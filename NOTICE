@@ -1,0 +1,99 @@
+mediapipe-native
+Copyright 2026 Bruno Gonçalves <www.biglinux.com.br>
+
+This crate is an independent Rust implementation of the inference path for
+Google MediaPipe vision models. Only that implementation — the executor,
+kernels, plan format, exporters and tools in this repository — is the work of
+its author and is provided under MIT OR Apache-2.0. The models themselves, their
+architectures and their trained weights are the work of the people credited
+in sections 2 and 3, and part of the kernel design derives from the work
+credited in section 1. Preserve LICENSE-MIT, LICENSE-APACHE and this notice.
+
+No model weights are included in this repository. The exporters in tools/
+convert model files you obtain yourself; the converted plans stay under the
+licence of the model they came from, and whoever redistributes them carries
+that licence and the provenance of the model with them.
+
+1. Kernel family and SIMD tiering.
+
+   The register-blocked transposed matrix-vector kernel, the runtime tier
+   dispatch (AVX2+FMA / AVX / SSE4.1 / scalar), the denormal flush on entry and
+   the 64-byte weight alignment derive from the BigLinux `dpdfnet-native`
+   package (MIT OR Apache-2.0), which in turn derives them from
+   `deepfilternet-quantized-ladspa` (MIT OR Apache-2.0). That package credits
+   DeepFilterNet: Hendrik Schröter, Tobias Rosenkranz, Alberto N. Escalante-B.
+   and Andreas Maier (MIT OR Apache-2.0).
+   https://github.com/Rikorose/DeepFilterNet
+
+   New here, for two-dimensional image tensors rather than single spectral
+   frames: the NHWC layout throughout, the pointwise micro-kernels that hold
+   several output blocks per pixel tile, the depthwise window kernels, the
+   folding of activations into a convolution's stores, the offline
+   buffer-lifetime assignment, and the format-2 and format-3 operations in
+   src/extra_ops.rs, written from the ONNX and TensorFlow Lite operator
+   definitions.
+
+2. MediaPipe models (Apache-2.0).
+
+   The models this crate runs were designed and trained by Google's MediaPipe
+   team and are published by Google LLC, each licensed under the Apache
+   License, Version 2.0, per its model card. Their architectures are described
+   in:
+
+   - Valentin Bazarevsky, Yury Kartynnik, Andrey Vakunov, Karthik Raveendran,
+     Matthias Grundmann. "BlazeFace: Sub-millisecond Neural Face Detection on
+     Mobile GPUs", 2019. https://arxiv.org/abs/1907.05047
+   - Yury Kartynnik, Artsiom Ablavatski, Ivan Grishchenko, Matthias Grundmann.
+     "Real-time Facial Surface Geometry from Monocular Video on Mobile GPUs",
+     2019. https://arxiv.org/abs/1907.06724
+   - Ivan Grishchenko, Artsiom Ablavatski, Yury Kartynnik, Karthik Raveendran,
+     Matthias Grundmann. "Attention Mesh: High-fidelity Face Mesh Prediction
+     in Real-time", 2020. https://arxiv.org/abs/2006.10962
+   - Fan Zhang, Valentin Bazarevsky, Andrey Vakunov, Andrei Tkachenka, George
+     Sung, Chuo-Ling Chang, Matthias Grundmann. "MediaPipe Hands: On-device
+     Real-time Hand Tracking", 2020. https://arxiv.org/abs/2006.10214
+   - Valentin Bazarevsky, Ivan Grishchenko, Karthik Raveendran, Tyler Zhu, Fan
+     Zhang, Matthias Grundmann. "BlazePose: On-device Real-time Body Pose
+     tracking", 2020. https://arxiv.org/abs/2006.10204
+   - Ivan Grishchenko, Valentin Bazarevsky, Andrei Zanfir, Eduard Gabriel
+     Bazavan, Mihai Zanfir, Richard Yee, Karthik Raveendran, Matsvei
+     Zhdanovich, Matthias Grundmann, Cristian Sminchisescu. "BlazePose GHUM
+     Holistic: Real-time 3D Human Landmarks and Pose Estimation", 2022.
+     https://arxiv.org/abs/2206.11678
+
+   Every model was downloaded from Google's MediaPipe solutions guide,
+   https://developers.google.com/edge/mediapipe/solutions/guide. The plans are
+   converted from these MediaPipe tasks:
+
+   - Face Landmarker v2: BlazeFace short-range detector and the 478-point face
+     mesh.
+     https://ai.google.dev/edge/mediapipe/solutions/vision/face_landmarker
+   - Hand Landmarker: palm detector and hand landmarks ("Model Card Hand
+     Tracking (Lite_Full) with Fairness Oct 2021").
+     https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker
+   - Holistic Landmarker: pose detector, pose landmarks with segmentation
+     ("Model Card BlazePose GHUM 3D"), hand ROI refinement, the 192-pixel face
+     mesh and the face blendshapes model.
+     https://ai.google.dev/edge/mediapipe/solutions/vision/holistic_landmarker
+
+   All of them are converted with tools/export_tflite.py from the .task
+   bundles; docs/models/hand-pose-holistic.md lists the download URLs
+   and SHA-256 of every file. Preserve the Apache-2.0 licence and the
+   provenance of each model alongside any converted plan you ship.
+
+   tests/reference/*.bin are outputs of these models computed by this crate
+   from synthetic, seeded input images (see tests/reference.rs). They contain
+   no weights and no images of people, and are covered by the crate's licence.
+
+3. Dependencies.
+
+   The crate depends on serde and serde_json. Their dependency graph carries
+   these licences:
+   MIT OR Apache-2.0 (serde, serde_core, serde_derive, serde_json, itoa,
+   proc-macro2, quote, syn), Unlicense OR MIT (memchr), MIT (zmij), and
+   (MIT OR Apache-2.0) AND Unicode-3.0 (unicode-ident).
+
+   No ONNX Runtime, OpenVINO, TensorFlow Lite or other inference runtime is
+   linked or called by the crate. The development tools in tools/ use NumPy,
+   ONNX, ONNX Runtime and TensorFlow, installed
+   separately, to convert models and cross-check results.

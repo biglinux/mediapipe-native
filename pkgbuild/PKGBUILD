@@ -1,0 +1,66 @@
+# Maintainer: Bruno Gonçalves <www.biglinux.com.br>
+
+pkgname=mediapipe-native
+pkgver=$(date +%y.%m.%d)
+pkgrel=$(date +%H%M)
+pkgdesc='MediaPipe face, hand and pose models run natively in Rust with SIMD for old and new x86 CPUs (benchmark and model plans)'
+arch=('x86_64')
+url="https://github.com/biglinux/${pkgname}"
+license=('MIT OR Apache-2.0' 'Apache-2.0')
+depends=('libgcc' 'glibc')
+makedepends=('git' 'rust' 'python-numpy' 'python-onnx' 'python-tensorflow')
+_models=https://storage.googleapis.com/mediapipe-models
+source=("git+${url}.git"
+        "${_models}/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+        "${_models}/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
+        "${_models}/holistic_landmarker/holistic_landmarker/float16/1/holistic_landmarker.task")
+# .task files are zip archives whose model names repeat between bundles.
+noextract=('face_landmarker.task' 'hand_landmarker.task' 'holistic_landmarker.task')
+sha256sums=('SKIP'
+            '64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff'
+            'fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1'
+            'e2dab61191e2dcd0a15f943d8e3ed1dce13c82dfa597b9dd39f562975a50c3f8')
+
+prepare() {
+    cd "${srcdir}/${pkgname}" || return
+    cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+    for bundle in face_landmarker hand_landmarker holistic_landmarker; do
+        mkdir -p "${srcdir}/${bundle}"
+        bsdtar -xf "${srcdir}/${bundle}.task" -C "${srcdir}/${bundle}"
+    done
+}
+
+# _export BUNDLE/MODEL PLAN_DIR [exporter options]
+_export() {
+    python tools/export_tflite.py "${srcdir}/$1.tflite" "plans/$2" \
+        --source "MediaPipe ${1%%/*}.task ${1#*/}.tflite (float16/1)" "${@:3}"
+}
+
+build() {
+    cd "${srcdir}/${pkgname}" || return
+    cargo build --frozen --release --bin mpbench
+    _export face_landmarker/face_detector face_detector --format 1
+    _export face_landmarker/face_landmarks_detector face_landmarks --format 1
+    _export hand_landmarker/hand_detector hand_detector
+    _export hand_landmarker/hand_landmarks_detector hand_landmarks
+    _export holistic_landmarker/hand_roi_refinement hand_roi_refinement
+    _export holistic_landmarker/pose_detector pose_detector
+    _export holistic_landmarker/pose_landmarks_detector pose_landmarks
+    _export holistic_landmarker/face_landmarks_detector holistic_face_landmarks
+    _export holistic_landmarker/face_blendshapes face_blendshapes
+}
+
+check() {
+    cd "${srcdir}/${pkgname}" || return
+    # Every plan against the committed reference outputs, at this CPU's tier.
+    cargo test --frozen --release --test reference --test runtime
+}
+
+package() {
+    cd "${srcdir}/${pkgname}" || return
+    install -Dm755 target/release/mpbench "${pkgdir}/usr/bin/mpbench"
+    for plan in plans/*/*.mpplan; do
+        install -Dm644 "${plan}" "${pkgdir}/usr/share/${pkgname}/${plan#plans/}"
+    done
+    install -Dm644 -t "${pkgdir}/usr/share/licenses/${pkgname}" LICENSE-MIT LICENSE-APACHE NOTICE
+}

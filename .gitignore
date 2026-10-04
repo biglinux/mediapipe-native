@@ -1,0 +1,11 @@
+/target
+# Plans are generated from upstream model files and keep their licence; rebuild
+# them with tools/export_tflite.py (see docs/getting-started.md).
+/plans
+/artifacts
+/vendor
+__pycache__/
+*.task
+*.tflite
+*.onnx
+*.mpplan
