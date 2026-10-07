@@ -19,7 +19,7 @@ code enforces.
 | `src/plan.rs` | The plan container and its validation: shapes, sizes, weight offsets, buffer aliasing and which operations each format allows. Nothing reaches a kernel unchecked. |
 | `src/lib.rs` | `Model`: aligned weight and scratch storage, the per-layer schedule decided at load time, and `run()`. |
 | `src/ops.rs` | Convolution, depthwise, activation and elementwise kernels for four instruction-set tiers, plus tier detection. |
-| `src/extra_ops.rs` | Layers only format-3 plans contain: average pooling, resize, depth-to-space, layer normalization and the blendshape model's input layers. |
+| `src/extra_ops.rs` | Layers only format-3 and later plans contain: average pooling, resize, depth-to-space, layer normalization and the blendshape model's input layers. |
 | `src/bin/mpbench.rs` | Timing, allocation counting and a per-operation profile for one plan. |
 
 `Model::load` may allocate and repack weights (for example into 16-column panels
@@ -44,10 +44,13 @@ or an operation it does not know rather than guessing.
 |---|---|---|
 | `mediapipe-native-plan/1` | `tools/export_tflite.py --format 1` (or `tools/export_graph.py` from ONNX) | convolution, depthwise, ReLU/PReLU, add, max pooling, channel padding, sigmoid and concatenation: the face models |
 | `mediapipe-native-plan/3` | `tools/export_tflite.py` | average pooling, clip, resize, depth-to-space, channel slice, transpose, layer normalization, input centring, constant concatenation, folded RELU6 and row-grouped scheduling |
+| `mediapipe-native-plan/4` | `tools/export_tflite.py`, when the model needs it | hard-swish, the squeeze-and-excite `channelmul` by a second tensor, and `fused` ReLU, hard-swish or sigmoid on a convolution or addition: the selfie segmenter |
 
 Format 3 is opt-in: format-1 plans keep the schedule and the bits their
 reference outputs pin, and `Plan::check` rejects any format-3 operation inside
-them.
+them. Format 4 schedules like format 3 and exists because an older binary
+would silently ignore the `fused` field; the exporter writes it only for a
+model that needs it, so the format-3 plans keep their bytes.
 
 ## Instruction-set tiers
 

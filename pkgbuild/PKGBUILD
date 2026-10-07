@@ -3,23 +3,27 @@
 pkgname=mediapipe-native
 pkgver=$(date +%y.%m.%d)
 pkgrel=$(date +%H%M)
-pkgdesc='MediaPipe face, hand and pose models run natively in Rust with SIMD for old and new x86 CPUs (benchmark and model plans)'
+pkgdesc='MediaPipe face, hand, pose and selfie-segmentation models run natively in Rust with SIMD for old and new x86 CPUs (benchmark and model plans)'
 arch=('x86_64')
 url="https://github.com/biglinux/${pkgname}"
-license=('MIT OR Apache-2.0' 'Apache-2.0')
+license=('MIT OR Apache-2.0' 'BSD-3-Clause' 'Apache-2.0')
 depends=('libgcc' 'glibc')
-makedepends=('git' 'rust' 'python-numpy' 'python-onnx' 'python-tensorflow')
+makedepends=('git' 'rust' 'python-flatbuffers' 'python-numpy' 'python-onnx' 'python-tensorflow')
 _models=https://storage.googleapis.com/mediapipe-models
 source=("git+${url}.git"
         "${_models}/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
         "${_models}/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
-        "${_models}/holistic_landmarker/holistic_landmarker/float16/1/holistic_landmarker.task")
-# .task files are zip archives whose model names repeat between bundles.
-noextract=('face_landmarker.task' 'hand_landmarker.task' 'holistic_landmarker.task')
+        "${_models}/holistic_landmarker/holistic_landmarker/float16/1/holistic_landmarker.task"
+        "${_models}/image_segmenter/selfie_segmenter_landscape/float16/1/selfie_segmenter_landscape.tflite")
+# .task files are zip archives whose model names repeat between bundles; the
+# .tflite ends in a zip of its label file, which the exporter does not need.
+noextract=('face_landmarker.task' 'hand_landmarker.task' 'holistic_landmarker.task'
+           'selfie_segmenter_landscape.tflite')
 sha256sums=('SKIP'
             '64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff'
             'fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1'
-            'e2dab61191e2dcd0a15f943d8e3ed1dce13c82dfa597b9dd39f562975a50c3f8')
+            'e2dab61191e2dcd0a15f943d8e3ed1dce13c82dfa597b9dd39f562975a50c3f8'
+            '490e9ea734313e0de10fa0cd9e3c6133e36ea4db2b7a49bde9ef019f72796b8e')
 
 prepare() {
     cd "${srcdir}/${pkgname}" || return
@@ -48,6 +52,8 @@ build() {
     _export holistic_landmarker/pose_landmarks_detector pose_landmarks
     _export holistic_landmarker/face_landmarks_detector holistic_face_landmarks
     _export holistic_landmarker/face_blendshapes face_blendshapes
+    python tools/export_tflite.py "${srcdir}/selfie_segmenter_landscape.tflite" plans/selfie_segmenter_landscape \
+        --source "MediaPipe image_segmenter selfie_segmenter_landscape.tflite (float16/1)"
 }
 
 check() {

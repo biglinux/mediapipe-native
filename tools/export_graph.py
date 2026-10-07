@@ -369,6 +369,7 @@ class Exporter:
                 src is not None
                 and src["kind"] in ("conv", "dwconv", "add")
                 and "act" not in src
+                and "fused" not in src
                 and readers.get(op["_x"], 0) == 1
             ):
                 src["act"] = op["w"]

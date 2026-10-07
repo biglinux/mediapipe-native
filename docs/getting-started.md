@@ -31,6 +31,7 @@ run never means inference was skipped.
 |---|---|---|
 | `face_detector`, `face_landmarks` | `tools/export_tflite.py --format 1` | `.tflite` files inside the MediaPipe Face Landmarker bundle |
 | hand, pose, holistic (seven plans) | `tools/export_tflite.py` | `.tflite` files inside the MediaPipe Tasks bundles |
+| `selfie_segmenter_landscape` | `tools/export_tflite.py` | `selfie_segmenter_landscape.tflite`, a model of its own ([guide](models/selfie-segmenter.md)) |
 
 The hand, pose and holistic bundles download directly from Google's model
 storage; [the model guide](models/hand-pose-holistic.md) has the URLs, hashes
@@ -63,7 +64,7 @@ different face model for the one a plan was exported from.
 Fill the input before every frame: its storage is reused as scratch later in
 the graph. Use RGB and each model's own value range; the face detector and the
 face mesh expect different normalization, so read the export metadata instead
-of applying one normalizer to both.
+of applying one normalizer to both. The selfie segmenter takes RGB in [0, 1].
 
 Outputs borrow model storage until the next mutable call. Copy what you need
 before writing the next input. The face mesh returns 478 × XYZ plus global

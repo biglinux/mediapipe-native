@@ -126,6 +126,11 @@ def prelu(x: np.ndarray, slope: np.ndarray) -> np.ndarray:
     return np.where(x < 0, x * slope, x)
 
 
+def hardswish(x: np.ndarray) -> np.ndarray:
+    """TFLite's definition, x * relu6(x + 3) / 6."""
+    return x * np.clip(x + 3, 0, 6) / 6
+
+
 def resize(op: dict, x: np.ndarray) -> np.ndarray:
     """Bilinear, half-pixel centres, clamped like TFLite's reference kernel."""
 
@@ -221,6 +226,10 @@ def run(
             y = np.concatenate([head, x.reshape(-1)]).reshape(
                 op["oh"], op["ow"], op["oc"]
             )
+        elif kind == "hardswish":
+            y = hardswish(x)
+        elif kind == "channelmul":
+            y = x * pool[op["x2"]].reshape(-1)[: op["oc"]]
         elif kind == "concat":
             head = x.reshape(-1)
             tail = pool[op["x2"]].reshape(-1)[: op["n2"]]
@@ -229,13 +238,19 @@ def run(
             raise SystemExit(f"unhandled operation {kind!r}")
 
         # Convolutions may carry a parametric ReLU folded into their tail,
-        # and (format 3) a clamp after it.
+        # (format 3) a clamp after it, or (format 4) a ReLU, hard-swish or sigmoid.
         folded = block(weights, op.get("act"))
         if folded is not None:
             y = prelu(y, folded)
         bounds = block(weights, op.get("clip"))
         if bounds is not None:
             y = np.clip(y, bounds[0], bounds[1])
+        if op.get("fused") == "relu":
+            y = np.maximum(y, 0.0)
+        elif op.get("fused") == "hardswish":
+            y = hardswish(y)
+        elif op.get("fused") == "sigmoid":
+            y = 1.0 / (1.0 + np.exp(-y.astype(np.float64)))
 
         pool[op["y"]] = y.astype(dtype)
         if keep:

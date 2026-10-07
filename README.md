@@ -1,8 +1,8 @@
 # mediapipe-native
 
-Run Google MediaPipe's face, hand and pose models on the CPU from Rust, with no
-inference runtime underneath — fast enough for head and eye input on a 2011
-laptop.
+Run Google MediaPipe's face, hand, pose and selfie-segmentation models on the
+CPU from Rust, with no inference runtime underneath — fast enough for head and
+eye input on a 2011 laptop.
 
 - **One small dependency tree.** Only `serde` and `serde_json`. No TensorFlow
   Lite, ONNX Runtime or OpenVINO.
@@ -25,6 +25,7 @@ laptop.
 | Palm detector, hand landmarks | `hand_detector`, `hand_landmarks` | 192², 224² | 6.27, 6.51 ms | 43.2, 43.8 ms |
 | Pose detector, pose landmarks + segmentation | `pose_detector`, `pose_landmarks` | 224², 256² | 8.36, 4.94 ms | 56.1, 33.9 ms |
 | Holistic face mesh, blendshapes, hand ROI | three plans | 192², 146×2, 256² | 0.80, 0.64, 0.38 ms | 5.4, 4.7, 2.5 ms |
+| Selfie segmentation (person mask, landscape) | `selfie_segmenter_landscape` | 256×144 | 0.95 ms | not measured |
 
 CPU time per frame on one thread, median of six interleaved runs
 ([performance](docs/performance.md)). The crate runs the networks only:
@@ -44,7 +45,7 @@ and are converted into *plans* (`.mpplan` files) under the ignored `plans/`
 directory. [Getting started](docs/getting-started.md) shows how to download the
 MediaPipe bundles, export them, and run the tests. The package built by
 [`pkgbuild/PKGBUILD`](pkgbuild/PKGBUILD) does the same from pinned bundles and
-installs the nine plans under `/usr/share/mediapipe-native/` with `mpbench`.
+installs the ten plans under `/usr/share/mediapipe-native/` with `mpbench`.
 Then time a plan:
 
 ```bash
@@ -97,10 +98,12 @@ needs to be accepted.
 ## Credits and license
 
 The models are the work of Google's MediaPipe team: BlazeFace, the face mesh,
-MediaPipe Hands, BlazePose and BlazePose GHUM Holistic, published under
-Apache-2.0. [NOTICE](NOTICE) lists their papers and authors, the code this
-builds on, and the licences of the models and dependencies.
+MediaPipe Hands, BlazePose, BlazePose GHUM Holistic and MediaPipe Selfie
+Segmentation, published under Apache-2.0. [NOTICE](NOTICE) lists their papers
+and authors, the code this builds on, and the licences of the models and
+dependencies.
 
 The Rust implementation is by Bruno Gonçalves ([BigLinux](https://www.biglinux.com.br))
 and is licensed MIT OR Apache-2.0, at your option ([LICENSE-MIT](LICENSE-MIT),
-[LICENSE-APACHE](LICENSE-APACHE)).
+[LICENSE-APACHE](LICENSE-APACHE)). The folded sigmoid and hard-swish follow
+XNNPACK's kernels and keep its BSD-3-Clause licence, which NOTICE carries.

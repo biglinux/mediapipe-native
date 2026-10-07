@@ -1,9 +1,9 @@
 //! Run MediaPipe vision models on the CPU with nothing underneath but Rust.
 //!
-//! The models this targets — the MediaPipe face detector and face mesh, and
-//! the hand, pose and holistic landmarkers — are built from a handful of
-//! operations repeated a hundred times: a 1x1 convolution, a depthwise
-//! convolution, an activation, an addition. A general
+//! The models this targets (the MediaPipe face detector and face mesh, the
+//! hand, pose and holistic landmarkers, and the selfie segmenter) are built
+//! from a handful of operations repeated a hundred times: a 1x1 convolution, a
+//! depthwise convolution, an activation, an addition. A general
 //! inference engine also supports many other graphs and execution strategies.
 //! This crate specializes those few operations and reserves its tensor storage
 //! at load time; no inference library is linked.
@@ -28,10 +28,10 @@
 //!
 //! # Getting a plan
 //!
-//! A plan is produced offline: `tools/export_tflite.py` converts the `.tflite`
-//! files inside MediaPipe task bundles (format 1 for the face models, format 3
-//! for the others), and `tools/export_graph.py` converts an ONNX export of the
-//! face models.
+//! A plan is produced offline: `tools/export_tflite.py` converts MediaPipe's
+//! `.tflite` files (format 1 for the face models, format 4 for the selfie
+//! segmenter, format 3 for the others), and `tools/export_graph.py` converts
+//! an ONNX export of the face models.
 //! Python, ONNX and TensorFlow are needed for that step only; none of them is
 //! a dependency of this crate or of anything that links it.
 //!
@@ -50,7 +50,7 @@ use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::path::Path;
 use std::ptr::NonNull;
 
-pub use plan::{Error, Kind, Plan};
+pub use plan::{Error, Fused, Kind, Plan};
 
 /// Cache-line-aligned allocation base. Individual NHWC rows may be unaligned;
 /// all generic SIMD paths therefore continue to use unaligned loads/stores.
@@ -126,7 +126,7 @@ pub struct Model {
     /// which saves writing back a tensor nothing observes.
     private_rows: Vec<bool>,
     rows: Buffer,
-    /// Format-3 plans group pointwise rows into runs of at least
+    /// Format-3 and later plans group pointwise rows into runs of at least
     /// [`GROUP_PIXELS`]: their 7- and 14-pixel rows are too short for the
     /// 12-pixel tiles, while whole large images would fall out of cache before
     /// the folded activation or the paired addition reads them. Format 1
@@ -149,7 +149,12 @@ impl Model {
     /// allocated or kernels execute. Eligible one-pixel heads are repacked
     /// once during loading, without changing the on-disk weights.
     pub fn load(dir: &Path) -> Result<Self, Error> {
-        let (plan, mut values) = Plan::load(dir)?;
+        let (plan, values) = Plan::load(dir)?;
+        Ok(Self::new(plan, values))
+    }
+
+    /// Schedule and store a checked plan.
+    fn new(plan: Plan, mut values: Vec<f32>) -> Self {
         let packed_heads = pack_heads(&plan, &mut values);
         let panels = pack_panels(&plan, &mut values);
         let row_pairs = plan
@@ -180,7 +185,7 @@ impl Model {
             add_relus[i] = add_relu_len(&plan, i);
             i += usize::from(add_relus[i]).max(1);
         }
-        let group_rows = plan.format == plan::FORMAT_V3;
+        let group_rows = plan.format != plan::FORMAT;
         let private_rows = (0..plan.ops.len())
             .map(|i| {
                 let conv = &plan.ops[i];
@@ -199,7 +204,7 @@ impl Model {
         // SAFETY: freshly allocated, no other view exists.
         unsafe { weights.get_mut() }.copy_from_slice(&values);
         let pool = plan.pool.iter().map(|&n| Buffer::new(n)).collect();
-        Ok(Self {
+        Self {
             plan,
             weights,
             pool,
@@ -211,7 +216,7 @@ impl Model {
             private_rows,
             rows: Buffer::new(rows),
             group_rows,
-        })
+        }
     }
 
     /// Height, width and channel count of the image this model expects.
@@ -416,15 +421,7 @@ impl Model {
                 };
                 let (x, x2) = (input(add.x), input(add.x2));
                 let y = unsafe { &mut self.pool[add.y].get_mut()[dst..dst + n] };
-                let clip = opt(add.clip, weights).map(|b| (b[0], b[1]));
-                if let Some(slope) = opt(add.act, weights) {
-                    ops::add_prelu(y, x, x2, slope, n, conv.oc);
-                    if let Some((low, high)) = clip {
-                        ops::clip_inplace(y, low, high);
-                    }
-                } else {
-                    ops::add_with(y, x, x2, n, clip);
-                }
+                add_with_tail(y, x, x2, n, conv.oc, Tail::of(add, weights));
             }
         }
     }
@@ -468,7 +465,6 @@ impl Model {
             // SAFETY: the weight buffer is never written after loading.
             let weights = unsafe { self.weights.get() };
             let block = |b: plan::Block| &weights[b.0..b.0 + b.1];
-            let act = (op.act.1 > 0).then(|| block(op.act));
             let tail = Tail::of(op, weights);
             match op.kind {
                 Kind::Conv if packed_head => {
@@ -487,18 +483,15 @@ impl Model {
                     ops::relu(y, x, n);
                 }
                 Kind::Add => {
-                    let n = op.out_len();
                     // SAFETY: as above; `x2` is proved distinct from `y`.
                     let x2 = unsafe { self.pool[op.x2].get() };
-                    let clip = opt(op.clip, weights).map(|b| (b[0], b[1]));
-                    if let Some(slope) = act {
-                        ops::add_prelu(y, x, x2, slope, n, op.oc);
-                        if let Some((low, high)) = clip {
-                            ops::clip_inplace(&mut y[..n], low, high);
-                        }
-                    } else {
-                        ops::add_with(y, x, x2, n, clip);
-                    }
+                    add_with_tail(y, x, x2, op.out_len(), op.oc, tail);
+                }
+                Kind::Hardswish => ops::hardswish(y, x, op.out_len()),
+                Kind::Channelmul => {
+                    // SAFETY: as above; `x2` is proved distinct from `y`.
+                    let gate = unsafe { &self.pool[op.x2].get()[..op.oc] };
+                    ops::channel_mul(y, x, gate, op.oh * op.ow, op.oc);
                 }
                 Kind::Maxpool => maxpool(op, x, y),
                 Kind::Padc => pad_channels(op, x, y),
@@ -597,18 +590,27 @@ fn rows_per_group(group_rows: bool, op: &plan::Op) -> usize {
 }
 
 /// Activations folded into a convolution's tail, applied to each finished run
-/// of outputs while it is still in cache: PReLU slopes, then a clamp.
+/// of outputs while it is still in cache: PReLU slopes, then a clamp; or
+/// (format 4) a ReLU, which is the clamp to `[0, inf]`, a hard-swish or a
+/// sigmoid.
 #[derive(Clone, Copy)]
 struct Tail<'a> {
     slope: Option<&'a [f32]>,
-    clip: Option<&'a [f32]>,
+    clip: Option<(f32, f32)>,
+    /// What runs after the clamp: `Hardswish`, `Sigmoid` or nothing.
+    fused: Fused,
 }
 
 impl<'a> Tail<'a> {
     fn of(op: &plan::Op, weights: &'a [f32]) -> Self {
+        let (clip, fused) = match op.fused {
+            Fused::Relu => (Some((0.0, f32::INFINITY)), Fused::None),
+            other => (opt(op.clip, weights).map(|b| (b[0], b[1])), other),
+        };
         Self {
             slope: opt(op.act, weights),
-            clip: opt(op.clip, weights),
+            clip,
+            fused,
         }
     }
 
@@ -616,7 +618,7 @@ impl<'a> Tail<'a> {
     /// PReLU has to run before it; what remains is still to be applied.
     fn fold_clip(self) -> (Option<(f32, f32)>, Self) {
         match (self.slope, self.clip) {
-            (None, Some(b)) => (Some((b[0], b[1])), Self { clip: None, ..self }),
+            (None, Some(b)) => (Some(b), Self { clip: None, ..self }),
             _ => (None, self),
         }
     }
@@ -625,10 +627,32 @@ impl<'a> Tail<'a> {
         if let Some(slope) = self.slope {
             ops::prelu_inplace(y, slope, y.len(), channels);
         }
-        if let Some(bounds) = self.clip {
-            ops::clip_inplace(y, bounds[0], bounds[1]);
+        if let Some((low, high)) = self.clip {
+            ops::clip_inplace(y, low, high);
+        }
+        self.finish(y);
+    }
+
+    fn finish(self, y: &mut [f32]) {
+        match self.fused {
+            Fused::Hardswish => ops::hardswish_inplace(y),
+            Fused::Sigmoid => ops::sigmoid_inplace(y),
+            Fused::None | Fused::Relu => {}
         }
     }
+}
+
+/// `y = x1 + x2` with the addition's folded activations.
+fn add_with_tail(y: &mut [f32], x1: &[f32], x2: &[f32], n: usize, channels: usize, tail: Tail) {
+    if let Some(slope) = tail.slope {
+        ops::add_prelu(y, x1, x2, slope, n, channels);
+        if let Some((low, high)) = tail.clip {
+            ops::clip_inplace(&mut y[..n], low, high);
+        }
+    } else {
+        ops::add_with(y, x1, x2, n, tail.clip);
+    }
+    tail.finish(&mut y[..n]);
 }
 
 /// Output columns for which this kernel column reads a real pixel rather than
@@ -1127,6 +1151,7 @@ fn add_relu_len(plan: &Plan, i: usize) -> u8 {
     if add.kind != Kind::Add
         || add.act.1 > 0
         || add.clip.1 > 0
+        || add.fused != Fused::None
         || relu.kind != Kind::Relu
         || relu.x != add.y
         || shape(relu) != shape(add)
@@ -1182,10 +1207,11 @@ fn dead_after(plan: &Plan, slot: usize, from: usize, n: usize) -> bool {
             | Kind::Layernorm
             | Kind::Centerscale
             | Kind::Constconcat => (op.in_len(), 0),
-            Kind::Relu | Kind::Prelu | Kind::Sigmoid | Kind::Clip => {
+            Kind::Relu | Kind::Prelu | Kind::Sigmoid | Kind::Clip | Kind::Hardswish => {
                 (op.in_len().max(op.out_len()), 0)
             }
             Kind::Add => (op.in_len().max(op.out_len()), op.out_len()),
+            Kind::Channelmul => (op.in_len().max(op.out_len()), op.oc),
             Kind::Concat => (op.in_len(), op.n2),
         };
         if (op.x == slot && read > clean) || (op.x2 == slot && read2 > clean) {
@@ -1567,6 +1593,145 @@ mod schedule_tests {
         let mut model = add_relu_model(12, 12, 4, false);
         model.plan.outputs[0].slot = 3;
         assert_eq!(add_relu_len(&model.plan, 0), 0);
+    }
+
+    /// A checked format-4 model over a 6x9 image of `c` channels: slot 0 is
+    /// the input, slot 1 a second input (filled by `run_v4`), `ops` the rest.
+    fn v4_model(c: usize, ops: serde_json::Value, outputs: &[usize], weights: usize) -> Model {
+        let n = 6 * 9 * c.max(16);
+        let plan: Plan = serde_json::from_value(serde_json::json!({
+            "format": plan::FORMAT_V4, "input": {"slot": 0, "h": 6, "w": 9, "c": c},
+            "pool": [n, n, n, n, n],
+            "outputs": outputs.iter().map(|&s| serde_json::json!({"slot": s, "n": n})).collect::<Vec<_>>(),
+            "ops": ops,
+        }))
+        .unwrap();
+        let values: Vec<f32> = (0..weights)
+            .map(|i| (i as f32 * 0.37).sin() * 0.6)
+            .collect();
+        plan.check(values.len()).expect("the test plan is valid");
+        Model::new(plan, values)
+    }
+
+    fn run_v4(model: &mut Model) -> Vec<Vec<u32>> {
+        let (h, w, c) = model.input_shape();
+        let image: Vec<f32> = (0..h * w * c)
+            .map(|i| (i as f32 * 0.29).cos() * 4.0)
+            .collect();
+        // SAFETY: the test holds the only reference to the model.
+        unsafe { model.pool[1].get_mut() }
+            .iter_mut()
+            .enumerate()
+            .for_each(|(i, v)| *v = (i as f32 * 0.13).sin() * 3.0);
+        model.input_mut().copy_from_slice(&image);
+        model.run();
+        results(model)
+    }
+
+    fn reference_activation(fused: &str, y: &mut [f32]) {
+        match fused {
+            "relu" => ops::clip_inplace(y, 0.0, f32::INFINITY),
+            "hardswish" => ops::hardswish_inplace(y),
+            "sigmoid" => ops::sigmoid_inplace(y),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn folded_activation_matches_separate() {
+        let (c, co) = (8, 16);
+        let conv = |fused: &str| {
+            serde_json::json!({"kind": "conv", "x": 0, "y": 2, "ih": 6, "iw": 9, "ic": c,
+                "oh": 6, "ow": 9, "oc": co, "kh": 1, "kw": 1, "sh": 1, "sw": 1,
+                "w": [0, c * co], "b": [c * co, co], "fused": fused})
+        };
+        let stem = |fused: &str| {
+            serde_json::json!({"kind": "conv", "x": 0, "y": 2, "ih": 6, "iw": 9, "ic": c,
+                "oh": 3, "ow": 5, "oc": co, "kh": 3, "kw": 3, "sh": 2, "sw": 2, "pt": 1, "pl": 1,
+                "w": [0, 9 * c * co], "b": [9 * c * co, co], "fused": fused})
+        };
+        let depthwise = |fused: &str| {
+            serde_json::json!({"kind": "dwconv", "x": 0, "y": 2, "ih": 6, "iw": 9, "ic": c,
+                "oh": 6, "ow": 9, "oc": c, "kh": 3, "kw": 3, "sh": 1, "sw": 1, "pt": 1, "pl": 1,
+                "w": [0, 9 * c], "b": [9 * c, c], "fused": fused})
+        };
+        let add = |fused: &str| {
+            serde_json::json!({"kind": "add", "x": 0, "x2": 1, "y": 2, "ih": 6, "iw": 9,
+                "ic": c, "oh": 6, "ow": 9, "oc": c, "fused": fused})
+        };
+        type Shape<'a> = (&'a str, &'a dyn Fn(&str) -> serde_json::Value, usize);
+        let shapes: [Shape; 4] = [
+            ("pointwise", &conv, c * co + co),
+            ("3x3 stride 2", &stem, 9 * c * co + co),
+            ("depthwise", &depthwise, 9 * c + c),
+            ("add", &add, 1),
+        ];
+        for (what, op, weights) in shapes {
+            let mut plain = v4_model(c, serde_json::json!([op("none")]), &[2], weights);
+            let n = plain.plan.ops[0].out_len();
+            let unfused = run_v4(&mut plain);
+            for fused in ["relu", "hardswish", "sigmoid"] {
+                let mut model = v4_model(c, serde_json::json!([op(fused)]), &[2], weights);
+                let mut want: Vec<f32> =
+                    unfused[0][..n].iter().map(|&b| f32::from_bits(b)).collect();
+                reference_activation(fused, &mut want);
+                let want: Vec<u32> = want.iter().map(|v| v.to_bits()).collect();
+                assert_eq!(run_v4(&mut model)[0][..n], want[..], "{what} with {fused}");
+            }
+        }
+    }
+
+    #[test]
+    fn folded_hardswish_equals_the_standalone_operation() {
+        let ops = |fused: bool| {
+            let mut ops = vec![serde_json::json!({"kind": "dwconv", "x": 0, "y": 2,
+                "ih": 6, "iw": 9, "ic": 5, "oh": 3, "ow": 5, "oc": 5, "kh": 5, "kw": 5,
+                "sh": 2, "sw": 2, "pt": 2, "pl": 2, "w": [0, 125], "b": [125, 5],
+                "fused": if fused { "hardswish" } else { "none" }})];
+            if !fused {
+                ops.push(serde_json::json!({"kind": "hardswish", "x": 2, "y": 3,
+                    "ih": 3, "iw": 5, "ic": 5, "oh": 3, "ow": 5, "oc": 5}));
+            }
+            serde_json::Value::from(ops)
+        };
+        let mut folded = v4_model(5, ops(true), &[2], 130);
+        let mut separate = v4_model(5, ops(false), &[3], 130);
+        assert_eq!(run_v4(&mut folded)[0][..75], run_v4(&mut separate)[0][..75]);
+    }
+
+    #[test]
+    fn folded_activations_survive_row_local_pairs() {
+        // Pointwise 8 -> 16 (folded), then its sum with slot 1 (folded).
+        for (conv, add) in [
+            ("hardswish", "none"),
+            ("sigmoid", "relu"),
+            ("relu", "hardswish"),
+        ] {
+            let ops = serde_json::json!([
+                {"kind": "conv", "x": 0, "y": 2, "ih": 6, "iw": 9, "ic": 8, "oh": 6, "ow": 9,
+                    "oc": 16, "kh": 1, "kw": 1, "sh": 1, "sw": 1, "w": [0, 128], "b": [128, 16],
+                    "fused": conv},
+                {"kind": "add", "x": 2, "x2": 1, "y": 3, "ih": 6, "iw": 9, "ic": 16,
+                    "oh": 6, "ow": 9, "oc": 16, "fused": add}
+            ]);
+            let mut model = v4_model(8, ops, &[2, 3], 144);
+            assert!(model.row_pairs[0], "{conv}/{add} should run as a pair");
+            let paired = run_v4(&mut model);
+            model.row_pairs[0] = false;
+            assert_eq!(run_v4(&mut model), paired, "{conv}/{add}");
+        }
+    }
+
+    #[test]
+    fn channel_mul_gates_each_channel() {
+        let ops = serde_json::json!([{"kind": "channelmul", "x": 0, "x2": 1, "y": 2,
+            "ih": 6, "iw": 9, "ic": 24, "oh": 6, "ow": 9, "oc": 24}]);
+        let mut model = v4_model(24, ops, &[0, 1, 2], 1);
+        let out = run_v4(&mut model);
+        let value = |slot: usize, i: usize| f32::from_bits(out[slot][i]);
+        for (i, &got) in out[2][..6 * 9 * 24].iter().enumerate() {
+            assert_eq!(got, (value(0, i) * value(1, i % 24)).to_bits(), "at {i}");
+        }
     }
 
     #[test]

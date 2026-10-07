@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turn a MediaPipe TFLite model into a format-3 plan the Rust executor runs.
+"""Turn a MediaPipe TFLite model into a plan the Rust executor runs.
 
 Offline, development only, like export_graph.py whose tensor bookkeeping,
 PReLU folding, buffer assignment and file layout this reuses unchanged. Only
@@ -19,26 +19,36 @@ constant MUL is a 1x1 depthwise convolution. FULLY_CONNECTED is a 1x1
 convolution on a one-pixel image, and a spatial MEAN a whole-image average
 pool. RELU6 becomes an explicit clamp to [0, 6].
 
+*Format 4.* HARD_SWISH and a MUL of a feature map by a computed per-channel
+vector (squeeze-and-excite) need plan format 4, which older executors refuse.
+There a RELU, HARD_SWISH or LOGISTIC that is the only reader of its input is
+folded into the convolution or addition producing it, also across a
+DEPTH_TO_SPACE. MediaPipe's Convolution2DTransposeBias, with kernel equal to
+stride, becomes a 1x1 convolution to stride^2 times the channels followed by
+DEPTH_TO_SPACE.
+
 Anything else is refused by name rather than approximated.
 
 Usage:
-    export_tflite.py MODEL.tflite OUTPUT_DIR [--format 1] [--source "note about provenance"]
+    export_tflite.py MODEL.tflite OUTPUT_DIR [--format 1|3|4] [--source "note about provenance"]
 
-`--format 1` stamps the original plan format, whose schedule the face plans'
-reference outputs pin; the executor refuses a format-1 plan holding a newer
-operation.
+The format defaults to 3, or 4 when the model needs it. `--format 1` stamps
+the original plan format, whose schedule the face plans' reference outputs
+pin; the executor refuses a format-1 plan holding a newer operation.
 """
 
 from __future__ import annotations
 
 import argparse
 import os
+import struct
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 
+import flatbuffers
 import numpy as np
 import tensorflow as tf
 from tensorflow.lite.python import schema_py_generated as S
@@ -51,6 +61,10 @@ ACTIVATION = {
     v: k for k, v in vars(S.ActivationFunctionType).items() if not k.startswith("_")
 }
 CONSTANT_PRODUCERS = ("DEQUANTIZE", "DENSIFY")
+# Operations only plan format 4 holds.
+FORMAT4_KINDS = ("hardswish", "channelmul")
+# TfLitePadding, as MediaPipe's custom operations store it in raw options.
+TFLITE_PADDING_SAME, TFLITE_PADDING_VALID = 1, 2
 
 
 def options(op, cls):
@@ -60,13 +74,83 @@ def options(op, cls):
     return value
 
 
+def transpose_conv_options(raw: bytes) -> tuple[int, int, int]:
+    """Padding, stride_w and stride_h of a raw TfLiteTransposeConvParams."""
+    if len(raw) != 12:
+        raise SystemExit(f"transposed convolution options are {len(raw)} bytes")
+    return struct.unpack("<3i", raw)
+
+
+def runnable(raw: bytes) -> bytes:
+    """The model with MediaPipe's Convolution2DTransposeBias replaced by
+    TFLite's builtin TRANSPOSE_CONV (version 3 takes a bias), so TensorFlow's
+    interpreter can run it. MediaPipe's kernel is TFLite's reference
+    transposed convolution seeded with the bias, with the same padding rule
+    for SAME and VALID. Existing tensor and buffer indices are kept."""
+    model = S.ModelT.InitFromPackedBuf(raw, 0)
+    custom = {
+        k
+        for k, code in enumerate(model.operatorCodes)
+        if code.customCode == b"Convolution2DTransposeBias"
+    }
+    if not custom:
+        return raw
+    code = S.OperatorCodeT()
+    code.builtinCode = code.deprecatedBuiltinCode = S.BuiltinOperator.TRANSPOSE_CONV
+    code.version = 3
+    model.operatorCodes.append(code)
+    for sub in model.subgraphs:
+        for op in sub.operators:
+            if op.opcodeIndex not in custom:
+                continue
+            padding, sw, sh = transpose_conv_options(bytes(op.customOptions or b""))
+            x, weight, bias = op.inputs
+            shape = S.BufferT()
+            shape.data = list(
+                np.array(sub.tensors[op.outputs[0]].shape, "<i4").tobytes()
+            )
+            model.buffers.append(shape)
+            tensor = S.TensorT()
+            tensor.shape, tensor.type = [4], S.TensorType.INT32
+            tensor.buffer, tensor.name = len(model.buffers) - 1, b"output_shape"
+            sub.tensors.append(tensor)
+            builtin = S.TransposeConvOptionsT()
+            builtin.padding = {
+                TFLITE_PADDING_SAME: S.Padding.SAME,
+                TFLITE_PADDING_VALID: S.Padding.VALID,
+            }[padding]
+            builtin.strideW, builtin.strideH = sw, sh
+            op.opcodeIndex = len(model.operatorCodes) - 1
+            op.inputs = [len(sub.tensors) - 1, weight, x, bias]
+            op.builtinOptionsType = S.BuiltinOptions.TransposeConvOptions
+            op.builtinOptions, op.customOptions = builtin, None
+    builder = flatbuffers.Builder(2 * len(raw))
+    builder.Finish(model.Pack(builder), file_identifier=b"TFL3")
+    return bytes(builder.Output())
+
+
+def blocks_as_pointwise(
+    weights: np.ndarray, bias: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """A transposed convolution whose kernel equals its stride, as a 1x1
+    convolution: `weights` is [out][kh][kw][in], the result [in][kh*kw*out]
+    with column (i * kw + j) * out + o for output o at offset (i, j) of the
+    block, the channel order DEPTH_TO_SPACE then spreads into place."""
+    out, kh, kw, ic = weights.shape
+    packed = weights.transpose(3, 1, 2, 0).reshape(ic, kh * kw * out)
+    return packed, np.tile(bias, kh * kw)
+
+
 def same_padding(size: int, out: int, stride: int, kernel: int) -> int:
     """TFLite SAME: the smaller half of the total padding goes first."""
     return max((out - 1) * stride + kernel - size, 0) // 2
 
 
 class TfliteExporter(export_graph.Exporter):
-    def __init__(self, path: Path) -> None:  # replaces the ONNX reader
+    def __init__(self, path: Path, plan_format: int | None = None) -> None:
+        # Overrides Exporter's ONNX reader. `plan_format` None picks 3, or 4
+        # if the model needs it.
+        self.format = plan_format
         raw = path.read_bytes()
         self.model = S.Model.GetRootAsModel(raw, 0)
         if self.model.SubgraphsLength() != 1:
@@ -78,7 +162,7 @@ class TfliteExporter(export_graph.Exporter):
         # Without the default XNNPACK delegate: it consumes the dequantized
         # weights internally and leaves those tensors unwritten.
         interpreter = tf.lite.Interpreter(
-            model_content=raw,
+            model_content=runnable(raw),
             experimental_preserve_all_tensors=True,
             num_threads=1,
             experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_WITHOUT_DEFAULT_DELEGATES,
@@ -201,32 +285,58 @@ class TfliteExporter(export_graph.Exporter):
         for pad in self.spatial_pad:
             if pad in {self.sub.Outputs(k) for k in range(self.sub.OutputsLength())}:
                 raise SystemExit("a spatially padded tensor is a model output")
-        self.fold_clips()
+        needs4 = any(op["kind"] in FORMAT4_KINDS for op in self.ops)
+        if self.format is None:
+            self.format = 4 if needs4 else 3
+        elif needs4 and self.format < 4:
+            raise SystemExit("this model needs plan format 4")
+        # write() stamps the module's format tag after convert().
+        export_graph.FORMAT = f"mediapipe-native-plan/{self.format}"
+        self.fold_into_producers()
 
-    def fold_clips(self) -> None:
+    def fold_into_producers(self) -> None:
         """Move a clamp into the convolution or addition that feeds it, the
-        way export_graph folds PReLU slopes, so it runs on rows still in cache."""
+        way export_graph folds PReLU slopes, so it runs on rows still in cache.
+        In format 4 a ReLU, hard-swish or sigmoid moves there too, also across
+        a DEPTH_TO_SPACE: it only moves values, so it commutes with them."""
         readers: dict[str, int] = {}
         for op in self.ops:
             for key in ("_x", "_x2"):
                 if key in op:
                     readers[op[key]] = readers.get(op[key], 0) + 1
         results = {o.name for o in self.graph.output}
+        # As for PReLU, the producer need not be the previous operation.
+        producers = {op["_y"]: op for op in self.ops}
         folded = []
+        if self.format >= 4:
+            foldable = ("clip", "relu", "hardswish", "sigmoid")
+        else:
+            foldable = ("clip",)
+
+        def private(name: str) -> bool:
+            return readers.get(name) == 1 and name not in results
+
         for op in self.ops:
-            last = folded[-1] if folded else None
+            src = producers.get(op["_x"]) if op["kind"] in foldable else None
+            renamed = src
             if (
-                op["kind"] == "clip"
-                and last is not None
-                and last["kind"] in ("conv", "dwconv", "add")
-                and "act" not in last
-                and "clip" not in last
-                and last["_y"] == op["_x"]
-                and readers.get(op["_x"]) == 1
-                and op["_x"] not in results
+                self.format >= 4
+                and src is not None
+                and src["kind"] == "depthtospace"
+                and private(src["_x"])
             ):
-                last["clip"] = op["w"]
-                last["_y"] = op["_y"]
+                src = producers.get(src["_x"])
+            if (
+                src is not None
+                and src["kind"] in ("conv", "dwconv", "add")
+                and not {"act", "clip", "fused"} & src.keys()
+                and private(op["_x"])
+            ):
+                if op["kind"] == "clip":
+                    src["clip"] = op["w"]
+                else:
+                    src["fused"] = op["kind"]
+                renamed["_y"] = op["_y"]
                 continue
             folded.append(op)
         self.ops = folded
@@ -450,6 +560,8 @@ class TfliteExporter(export_graph.Exporter):
             a, b = b, a
         out = self.outputs(op)[0]
         h, w, c = self.record(out)
+        if b not in self.constant:
+            return self.channel_mul(op, a, b, out)
         scale = self.value(b).astype(np.float32).reshape(-1)
         if scale.size == 1:
             scale = np.full(c, scale[0], np.float32)
@@ -477,6 +589,124 @@ class TfliteExporter(export_graph.Exporter):
         )
         if y != self.names[out]:
             self.ops.append(self.ops.pop(-2))
+
+    def channel_mul(self, op, a: int, b: int, out: int) -> None:
+        """A feature map times a computed vector of one value per channel,
+        the gate of a squeeze-and-excite block."""
+        if self.hwc_of(a)[:2] == (1, 1):
+            a, b = b, a
+        h, w, c = self.hwc_of(out)
+        if self.hwc_of(a) != (h, w, c) or self.hwc_of(b) != (1, 1, c):
+            raise SystemExit(
+                "only a feature map times a per-channel vector is supported"
+            )
+        y = self.activate(op, S.MulOptions, out)
+        self.emit(
+            "channelmul",
+            self.names[a],
+            y,
+            second=self.names[b],
+            ih=h,
+            iw=w,
+            ic=c,
+            oh=h,
+            ow=w,
+            oc=c,
+        )
+        if y != self.names[out]:
+            self.ops.append(self.ops.pop(-2))
+
+    def on_hard_swish(self, op) -> None:
+        x, out = self.inputs(op)[0], self.outputs(op)[0]
+        h, w, c = self.record(out)
+        self.emit(
+            "hardswish",
+            self.names[x],
+            self.names[out],
+            ih=h,
+            iw=w,
+            ic=c,
+            oh=h,
+            ow=w,
+            oc=c,
+        )
+
+    def on_custom(self, op) -> None:
+        code = self.model.OperatorCodes(op.OpcodeIndex()).CustomCode().decode()
+        if code != "Convolution2DTransposeBias":
+            raise SystemExit(f"no rule for custom operation {code}")
+        self.transpose_conv(op)
+
+    def transpose_conv(self, op) -> None:
+        """MediaPipe's transposed convolution with bias, for kernel == stride
+        and no padding: every input pixel writes its own stride-by-stride
+        block, which is a 1x1 convolution to stride^2 x out channels, then
+        DEPTH_TO_SPACE. The options are a raw TfLiteTransposeConvParams:
+        padding, stride_w, stride_h as 32-bit integers."""
+        if len(self.inputs(op)) != 3:
+            raise SystemExit("a transposed convolution takes input, weights and bias")
+        x, weight, bias = self.inputs(op)
+        out = self.outputs(op)[0]
+        raw = op.CustomOptionsAsNumpy().tobytes() if op.CustomOptionsLength() else b""
+        padding, sw, sh = transpose_conv_options(raw)
+        w = self.value(weight).astype(np.float32)  # [out][kh][kw][in]
+        b = self.value(bias).astype(np.float32).reshape(-1)
+        if w.ndim != 4:
+            raise SystemExit("transposed convolution weights must be [out, kh, kw, in]")
+        _, ih, iw, ic = self.dims4(x)
+        _, oh, ow, oc = self.dims4(out)
+        self.record(out)
+        _, kh, kw, wi = w.shape
+        if padding not in (TFLITE_PADDING_SAME, TFLITE_PADDING_VALID):
+            raise SystemExit(f"transposed convolution padding {padding} is unknown")
+        # MediaPipe pads SAME by kh - (ih - 1) % sh - 1 (VALID by nothing):
+        # with kernel == stride, zero exactly when the stride divides the input.
+        same = padding == TFLITE_PADDING_SAME
+        if (
+            (kh, kw) != (sh, sw)
+            or sh != sw
+            or sh < 2
+            or (same and (ih % sh or iw % sw))
+            or (wi, w.shape[0], b.size) != (ic, oc, oc)
+            or (oh, ow) != (ih * sh, iw * sw)
+        ):
+            raise SystemExit(
+                "only transposed convolutions whose kernel equals the stride, "
+                f"unpadded, are supported (kernel {kh}x{kw}, stride {sh}x{sw})"
+            )
+        packed, tiled = blocks_as_pointwise(w, b)
+        blocks = f"{self.names[out]}#blocks"
+        self.note(blocks, ih, iw, sh * sw * oc)
+        self.emit(
+            "conv",
+            self.names[x],
+            blocks,
+            kh=1,
+            kw=1,
+            sh=1,
+            sw=1,
+            pt=0,
+            pl=0,
+            ih=ih,
+            iw=iw,
+            ic=ic,
+            oh=ih,
+            ow=iw,
+            oc=sh * sw * oc,
+            w=self.put(packed),
+            b=self.put(tiled),
+        )
+        self.emit(
+            "depthtospace",
+            blocks,
+            self.names[out],
+            ih=ih,
+            iw=iw,
+            ic=sh * sw * oc,
+            oh=oh,
+            ow=ow,
+            oc=oc,
+        )
 
     def on_prelu(self, op) -> None:
         x, alpha = self.inputs(op)
@@ -901,13 +1131,15 @@ def main() -> None:
         "--source", default="", help="note recorded in the plan for provenance"
     )
     parser.add_argument(
-        "--format", type=int, choices=(1, 3), default=3, help="plan format to write"
+        "--format",
+        type=int,
+        choices=(1, 3, 4),
+        default=None,
+        help="plan format to write (default 3, or 4 when the model needs it)",
     )
     args = parser.parse_args()
 
-    exporter = TfliteExporter(args.model)
-    # write() stamps the module's format tag.
-    export_graph.FORMAT = f"mediapipe-native-plan/{args.format}"
+    exporter = TfliteExporter(args.model, args.format)
     plan = exporter.write(args.out_dir, args.model.stem, args.source)
     if not np.frombuffer(bytes(exporter.blob), dtype=np.float32).any():
         raise SystemExit(
@@ -916,6 +1148,7 @@ def main() -> None:
 
     scratch = sum(plan["pool"]) * 4
     print(f"plan         {args.out_dir / (args.model.stem + '.mpplan')}")
+    print(f"format       {plan['format']}")
     print(f"operations   {len(plan['ops'])}")
     print(f"weights      {len(exporter.blob) / 1e6:.2f} MB")
     print(f"scratch      {scratch / 1e6:.2f} MB in {len(plan['pool'])} buffers")

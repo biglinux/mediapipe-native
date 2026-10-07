@@ -200,6 +200,88 @@ macro_rules! vfma {
     };
 }
 
+#[cfg(target_arch = "x86_64")]
+macro_rules! vmul {
+    (8, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm256_mul_ps($a, $b)
+    };
+    (4, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm_mul_ps($a, $b)
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+macro_rules! vadd {
+    (8, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm256_add_ps($a, $b)
+    };
+    (4, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm_add_ps($a, $b)
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+macro_rules! vsub {
+    (8, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm256_sub_ps($a, $b)
+    };
+    (4, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm_sub_ps($a, $b)
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+macro_rules! vdiv {
+    (8, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm256_div_ps($a, $b)
+    };
+    (4, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm_div_ps($a, $b)
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+macro_rules! vor {
+    (8, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm256_or_ps($a, $b)
+    };
+    (4, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm_or_ps($a, $b)
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+macro_rules! vandnot {
+    (8, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm256_andnot_ps($a, $b)
+    };
+    (4, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm_andnot_ps($a, $b)
+    };
+}
+
+/// `a < b`, ordered and signalling, as an all-ones lane mask.
+#[cfg(target_arch = "x86_64")]
+macro_rules! vlt {
+    (8, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm256_cmp_ps::<{ std::arch::x86_64::_CMP_LT_OS }>($a, $b)
+    };
+    (4, $a:expr, $b:expr) => {
+        std::arch::x86_64::_mm_cmplt_ps($a, $b)
+    };
+}
+
+/// `b` where the sign bit of `mask` is set, else `a`.
+#[cfg(target_arch = "x86_64")]
+macro_rules! vblendv {
+    (8, $a:expr, $b:expr, $mask:expr) => {
+        std::arch::x86_64::_mm256_blendv_ps($a, $b, $mask)
+    };
+    (4, $a:expr, $b:expr, $mask:expr) => {
+        std::arch::x86_64::_mm_blendv_ps($a, $b, $mask)
+    };
+}
+
 #[inline]
 fn span(a: usize, b: usize) -> usize {
     a.checked_mul(b).expect("kernel dimensions overflow")
@@ -1867,6 +1949,308 @@ unsafe fn clip_avx(y: &mut [f32], low: f32, high: f32) {
     }
 }
 
+/// `1/6` rounded to `f32`: hard-swish multiplies by it, as XNNPACK does,
+/// instead of dividing by six.
+const SIXTH: f32 = 1.0 / 6.0;
+
+/// `y = hardswish(x)` for `n` values: `x * min(max(x * (1/6) + 1/2, 0), 1)`,
+/// the arithmetic of XNNPACK, TensorFlow Lite's default CPU path. Tier 3
+/// fuses the first multiply and add, also in its scalar tail, so every value
+/// gets the same rounding wherever a run is split; tiers 0-2 round twice and
+/// agree with each other. NaN passes through, as in [`clip_inplace`].
+pub(crate) fn hardswish(y: &mut [f32], x: &[f32], n: usize) {
+    assert!(y.len() >= n && x.len() >= n);
+    // SAFETY: both extents checked above; `&mut` and `&` cannot overlap.
+    unsafe { hardswish_from(y.as_mut_ptr(), x.as_ptr(), n) }
+}
+
+/// [`hardswish`] in place, for a folded activation.
+pub(crate) fn hardswish_inplace(y: &mut [f32]) {
+    let p = y.as_mut_ptr();
+    // SAFETY: source and destination are the same `y.len()` floats, and each
+    // element is read before it is written.
+    unsafe { hardswish_from(p, p, y.len()) }
+}
+
+/// # Safety
+/// `y` and `x` must be valid for `n` floats and either equal or disjoint.
+unsafe fn hardswish_from(y: *mut f32, x: *const f32, n: usize) {
+    // SAFETY: the caller's contract; each kernel's instruction set was detected.
+    unsafe {
+        #[cfg(target_arch = "x86_64")]
+        match simd_tier() {
+            3 => return hardswish_avx2(y, x, n),
+            2 => return hardswish_avx(y, x, n),
+            1 => return hardswish_sse(y, x, n),
+            _ => {}
+        }
+        for i in 0..n {
+            let v = *x.add(i);
+            *y.add(i) = v * (v * SIXTH + 0.5).clamp(0.0, 1.0);
+        }
+    }
+}
+
+/// `$lanes` values at a time, then the same arithmetic one value at a time.
+#[cfg(target_arch = "x86_64")]
+macro_rules! hardswish_body {
+    ($y:expr, $x:expr, $n:expr, $lanes:tt, $fma:tt) => {{
+        // SAFETY: `y` and `x` hold `n` floats and are equal or disjoint (the
+        // kernels' contract); each block is loaded before it is stored.
+        unsafe {
+            let (y, x, n) = ($y, $x, $n);
+            let (sixth, half) = (vsplat!($lanes, SIXTH), vsplat!($lanes, 0.5));
+            let (zero, one) = (vsplat!($lanes, 0.0), vsplat!($lanes, 1.0));
+            let mut i = 0;
+            while i + $lanes <= n {
+                let v = vld!($lanes, x.add(i));
+                let gate = vclip!($lanes, vfma!($lanes, $fma, v, sixth, half), zero, one);
+                vst!($lanes, y.add(i), vmul!($lanes, v, gate));
+                i += $lanes;
+            }
+            while i < n {
+                let v = *x.add(i);
+                let gate = if $fma {
+                    v.mul_add(SIXTH, 0.5)
+                } else {
+                    v * SIXTH + 0.5
+                };
+                *y.add(i) = v * gate.clamp(0.0, 1.0);
+                i += 1;
+            }
+        }
+    }};
+}
+
+/// # Safety
+/// As [`hardswish_from`], on a CPU with AVX2 and FMA; likewise the AVX and
+/// SSE4.1 kernels below on their own instruction sets.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn hardswish_avx2(y: *mut f32, x: *const f32, n: usize) {
+    hardswish_body!(y, x, n, 8, true)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn hardswish_avx(y: *mut f32, x: *const f32, n: usize) {
+    hardswish_body!(y, x, n, 8, false)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn hardswish_sse(y: *mut f32, x: *const f32, n: usize) {
+    hardswish_body!(y, x, n, 4, false)
+}
+
+/// Squeeze-and-excite gating: `y[p][k] = x[p][k] * gate[k]` for `pixels`
+/// pixels of `c` channels. One rounded product per value, so every tier
+/// gives the same bits; the vector tiers only widen the loop.
+pub(crate) fn channel_mul(y: &mut [f32], x: &[f32], gate: &[f32], pixels: usize, c: usize) {
+    let n = span(pixels, c);
+    assert!(y.len() >= n && x.len() >= n && gate.len() >= c && c > 0);
+    let (y, x, gate) = (&mut y[..n], &x[..n], &gate[..c]);
+    #[cfg(target_arch = "x86_64")]
+    if simd_tier() >= 2 {
+        // SAFETY: AVX was detected.
+        return unsafe { channel_mul_avx(y, x, gate) };
+    }
+    channel_mul_rows(y, x, gate);
+}
+
+#[inline(always)]
+fn channel_mul_rows(y: &mut [f32], x: &[f32], gate: &[f32]) {
+    let c = gate.len();
+    for (out, pixel) in y.chunks_exact_mut(c).zip(x.chunks_exact(c)) {
+        for ((o, &v), &g) in out.iter_mut().zip(pixel).zip(gate) {
+            *o = v * g;
+        }
+    }
+}
+
+/// [`channel_mul_rows`] compiled for AVX: the compiler widens the product loop.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn channel_mul_avx(y: &mut [f32], x: &[f32], gate: &[f32]) {
+    channel_mul_rows(y, x, gate);
+}
+
+// Constants of XNNPACK's f32-vsigmoid "p5-div" kernels: exp(-|x|) as 2^n
+// times a degree-5 polynomial, n rounded by a magic bias that also leaves
+// the exponent bits of 2^n in place.
+const EXP_MAGIC_BIAS: f32 = f32::from_bits(0x4b40_007f); // 0x1.8000FEp23
+const LOG2E: f32 = f32::from_bits(0x3fb8_aa3b); // 0x1.715476p0
+const MINUS_LN2: f32 = f32::from_bits(0xbf31_7218); // -0x1.62E430p-1
+const MINUS_LN2_HI: f32 = f32::from_bits(0xbf31_7200); // -0x1.62E400p-1
+const MINUS_LN2_LO: f32 = f32::from_bits(0xb5bf_be8e); // -0x1.7F7D1Cp-20
+const EXP_C5: f32 = f32::from_bits(0x3c07_cfce); // 0x1.0F9F9Cp-7
+const EXP_C4: f32 = f32::from_bits(0x3d2b_9d0d); // 0x1.573A1Ap-5
+const EXP_C3: f32 = f32::from_bits(0x3e2a_ad40); // 0x1.555A80p-3
+const EXP_C2: f32 = f32::from_bits(0x3eff_fee3); // 0x1.FFFDC6p-2
+const EXP_C1: f32 = f32::from_bits(0x3f7f_fffb); // 0x1.FFFFF6p-1
+/// Below this, exp(z) is denormal and the sigmoid of -|x| is taken as 0.
+const EXP_CUTOFF: f32 = f32::from_bits(0xc2ae_ac4f); // -0x1.5D589Ep+6
+
+/// The logistic function in place, as XNNPACK's `f32-vsigmoid` computes it:
+/// with `z = -|x|` and `e = exp(z)` from a degree-5 polynomial, `e / (e + 1)`
+/// for negative `x` and `1 -` that otherwise, so neither tail cancels. Tier 3
+/// reduces the argument with one fused multiply-add (`rr1`), the other tiers
+/// with two-part `ln 2` (`rr2`); tiers 0-2 give the same bits. This is the
+/// folded format-4 activation; the standalone `Sigmoid` keeps libm's `exp`.
+pub(crate) fn sigmoid_inplace(y: &mut [f32]) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let (p, n) = (y.as_mut_ptr(), y.len());
+        // SAFETY: the kernels read and write `y`'s `n` floats, each value
+        // before its own store; each instruction set was detected.
+        unsafe {
+            match simd_tier() {
+                3 => return sigmoid_avx2(p, n),
+                2 => return sigmoid_avx(p, n),
+                1 => return sigmoid_sse(p, n),
+                _ => {}
+            }
+        }
+    }
+    for v in y {
+        *v = sigmoid_one::<false>(*v);
+    }
+}
+
+/// One value of [`sigmoid_inplace`]; `FMA` selects tier 3's arithmetic.
+#[inline(always)]
+fn sigmoid_one<const FMA: bool>(x: f32) -> f32 {
+    let madd = |a: f32, b: f32, c: f32| if FMA { a.mul_add(b, c) } else { a * b + c };
+    let z = f32::from_bits(x.to_bits() | 0x8000_0000);
+    let n = madd(z, LOG2E, EXP_MAGIC_BIAS);
+    let s = f32::from_bits(n.to_bits() << 23);
+    let n = n - EXP_MAGIC_BIAS;
+    let t = if FMA {
+        madd(n, MINUS_LN2, z)
+    } else {
+        madd(n, MINUS_LN2_LO, madd(n, MINUS_LN2_HI, z))
+    };
+    let p = madd(
+        madd(madd(madd(EXP_C5, t, EXP_C4), t, EXP_C3), t, EXP_C2),
+        t,
+        EXP_C1,
+    );
+    let e = madd(t * s, p, s);
+    let f = if z < EXP_CUTOFF { 0.0 } else { e / (e + 1.0) };
+    if x.is_sign_negative() {
+        f
+    } else {
+        1.0 - f
+    }
+}
+
+/// [`sigmoid_one`] on `$lanes` values at a time, then one at a time.
+/// `$exp2` turns the biased `n` into `2^n`.
+#[cfg(target_arch = "x86_64")]
+macro_rules! sigmoid_body {
+    ($p:expr, $n:expr, $lanes:tt, $fma:tt, $exp2:ident) => {{
+        // SAFETY: `p` holds `n` floats (the kernels' contract); each block is
+        // loaded before it is stored, and the tail reads and writes one value.
+        unsafe {
+            let (p, n) = ($p, $n);
+            let sign = vsplat!($lanes, -0.0);
+            let (bias, log2e) = (vsplat!($lanes, EXP_MAGIC_BIAS), vsplat!($lanes, LOG2E));
+            let (one, cutoff) = (vsplat!($lanes, 1.0), vsplat!($lanes, EXP_CUTOFF));
+            let mut i = 0;
+            while i + $lanes <= n {
+                let x = vld!($lanes, p.add(i));
+                let z = vor!($lanes, x, sign);
+                let k = vfma!($lanes, $fma, z, log2e, bias);
+                let s = $exp2(k);
+                let k = vsub!($lanes, k, bias);
+                let t = if $fma {
+                    vfma!($lanes, $fma, k, vsplat!($lanes, MINUS_LN2), z)
+                } else {
+                    let t = vfma!($lanes, $fma, k, vsplat!($lanes, MINUS_LN2_HI), z);
+                    vfma!($lanes, $fma, k, vsplat!($lanes, MINUS_LN2_LO), t)
+                };
+                let mut q = vfma!(
+                    $lanes,
+                    $fma,
+                    vsplat!($lanes, EXP_C5),
+                    t,
+                    vsplat!($lanes, EXP_C4)
+                );
+                q = vfma!($lanes, $fma, q, t, vsplat!($lanes, EXP_C3));
+                q = vfma!($lanes, $fma, q, t, vsplat!($lanes, EXP_C2));
+                q = vfma!($lanes, $fma, q, t, vsplat!($lanes, EXP_C1));
+                let e = vfma!($lanes, $fma, vmul!($lanes, t, s), q, s);
+                let f = vdiv!($lanes, e, vadd!($lanes, e, one));
+                let f = vandnot!($lanes, vlt!($lanes, z, cutoff), f);
+                vst!(
+                    $lanes,
+                    p.add(i),
+                    vblendv!($lanes, vsub!($lanes, one, f), f, x)
+                );
+                i += $lanes;
+            }
+            while i < n {
+                *p.add(i) = sigmoid_one::<$fma>(*p.add(i));
+                i += 1;
+            }
+        }
+    }};
+}
+
+/// `2^n` from the magic-biased `k`: its low bits shifted into the exponent.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+#[inline]
+fn exp2_bits_avx2(k: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+    use std::arch::x86_64::*;
+    _mm256_castsi256_ps(_mm256_slli_epi32(_mm256_castps_si256(k), 23))
+}
+
+/// [`exp2_bits_avx2`] for AVX, which has no 256-bit integer shift: each half
+/// is shifted with SSE2.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+#[inline]
+fn exp2_bits_avx(k: std::arch::x86_64::__m256) -> std::arch::x86_64::__m256 {
+    use std::arch::x86_64::*;
+    let low = exp2_bits_sse(_mm256_castps256_ps128(k));
+    _mm256_insertf128_ps(
+        _mm256_castps128_ps256(low),
+        exp2_bits_sse(_mm256_extractf128_ps(k, 1)),
+        1,
+    )
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+#[inline]
+fn exp2_bits_sse(k: std::arch::x86_64::__m128) -> std::arch::x86_64::__m128 {
+    use std::arch::x86_64::*;
+    _mm_castsi128_ps(_mm_slli_epi32(_mm_castps_si128(k), 23))
+}
+
+/// # Safety
+/// `p` must be valid for reading and writing `n` floats, on a CPU with AVX2
+/// and FMA; likewise the AVX and SSE4.1 kernels below on their own
+/// instruction sets.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+unsafe fn sigmoid_avx2(p: *mut f32, n: usize) {
+    sigmoid_body!(p, n, 8, true, exp2_bits_avx2)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx")]
+unsafe fn sigmoid_avx(p: *mut f32, n: usize) {
+    sigmoid_body!(p, n, 8, false, exp2_bits_avx)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn sigmoid_sse(p: *mut f32, n: usize) {
+    sigmoid_body!(p, n, 4, false, exp2_bits_sse)
+}
+
 /// Copy and apply ReLU in one pass, preserving the existing tier semantics.
 pub(crate) fn relu(y: &mut [f32], x: &[f32], n: usize) {
     assert!(y.len() >= n && x.len() >= n);
@@ -2929,16 +3313,6 @@ unsafe fn dw3_sse<const C: usize>(
     } else {
         dw3_body!(y, x, w, b, count, c, row, step, chans, bounds, 4, false)
     }
-}
-
-#[cfg(target_arch = "x86_64")]
-macro_rules! vadd {
-    (8,$a:expr,$b:expr) => {
-        std::arch::x86_64::_mm256_add_ps($a, $b)
-    };
-    (4,$a:expr,$b:expr) => {
-        std::arch::x86_64::_mm_add_ps($a, $b)
-    };
 }
 
 // Pixel batching also for widths 24, 28, 36, 42, 88, etc. on the SSE tier;
@@ -4708,6 +5082,118 @@ mod tests {
         clip_inplace(&mut got, 0.0, 6.0);
         for (&g, &v) in got.iter().zip(&values) {
             assert_eq!(g.to_bits(), v.clamp(0.0, 6.0).to_bits(), "{v}");
+        }
+    }
+
+    /// Values around every branch of hard-swish and the sigmoid: NaN of
+    /// either sign, signed zeros, infinities, the hard-swish knees at +-3,
+    /// the sigmoid's denormal cutoff near -87.3, and a smooth sweep.
+    fn activation_inputs() -> Vec<f32> {
+        let mut values = vec![
+            f32::NAN,
+            -f32::NAN,
+            0.0,
+            -0.0,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            3.0,
+            -3.0,
+            3.0f32.next_up(),
+            (-3.0f32).next_down(),
+            EXP_CUTOFF,
+            EXP_CUTOFF.next_up(),
+            -EXP_CUTOFF,
+            1.0e-40,
+            -1.0e-40,
+            f32::MAX,
+            f32::MIN,
+        ];
+        values.extend((0..4000).map(|i| (i as f32 - 2000.0) * 0.0517));
+        values
+    }
+
+    #[test]
+    fn hardswish_matches_scalar_bits() {
+        let fma = simd_tier() == 3;
+        let x = activation_inputs();
+        // Odd lengths exercise every vector tail.
+        for n in [x.len(), x.len() - 3, 5] {
+            let mut copied = vec![0.0; n];
+            hardswish(&mut copied, &x, n);
+            let mut in_place = x[..n].to_vec();
+            hardswish_inplace(&mut in_place);
+            for (i, &v) in x[..n].iter().enumerate() {
+                if v.is_nan() {
+                    assert!(copied[i].is_nan() && in_place[i].is_nan());
+                    continue;
+                }
+                let gate = if fma {
+                    v.mul_add(SIXTH, 0.5)
+                } else {
+                    v * SIXTH + 0.5
+                };
+                let want = v * gate.clamp(0.0, 1.0);
+                assert_eq!(copied[i].to_bits(), want.to_bits(), "hardswish({v})");
+                assert_eq!(in_place[i].to_bits(), want.to_bits(), "in place, {v}");
+                if v.is_finite() && v.abs() < 1.0e6 {
+                    let exact = v as f64 * (v as f64 + 3.0).clamp(0.0, 6.0) / 6.0;
+                    assert!(
+                        (want as f64 - exact).abs() <= 1.0e-6 * exact.abs().max(1.0),
+                        "{v}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sigmoid_matches_scalar_and_libm() {
+        let fma = simd_tier() == 3;
+        let x = activation_inputs();
+        for n in [x.len(), x.len() - 3, 7] {
+            let mut got = x[..n].to_vec();
+            sigmoid_inplace(&mut got);
+            for (&g, &v) in got.iter().zip(&x) {
+                // NaN stays NaN; its sign is not something LLVM preserves.
+                if v.is_nan() {
+                    assert!(g.is_nan());
+                    continue;
+                }
+                let want = if fma {
+                    sigmoid_one::<true>(v)
+                } else {
+                    sigmoid_one::<false>(v)
+                };
+                assert_eq!(g.to_bits(), want.to_bits(), "sigmoid({v})");
+                // Within 1e-7 absolutely, and 4 units in the last place where
+                // the result is a normal float, like libm's `1 / (1 + exp(-x))`.
+                let exact = 1.0 / (1.0 + (-(v as f64)).exp());
+                let gap = (g as f64 - exact).abs();
+                let relative =
+                    exact < f32::MIN_POSITIVE as f64 || gap <= 4.0 * f32::EPSILON as f64 * exact;
+                assert!(
+                    gap <= 1.0e-7 && relative,
+                    "sigmoid({v}) = {g}, exactly {exact}"
+                );
+            }
+        }
+        // The tails saturate exactly; the middle is exactly one half.
+        let mut ends = [f32::NEG_INFINITY, -100.0, 0.0, -0.0, 100.0, f32::INFINITY];
+        sigmoid_inplace(&mut ends);
+        assert_eq!(ends, [0.0, 0.0, 0.5, 0.5, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn channel_mul_matches_scalar_product() {
+        for c in [16, 24, 7, 1] {
+            let pixels = 13;
+            let (x, gate) = (ramp(pixels * c, 0.3), ramp(c, 1.1));
+            let mut y = vec![f32::NAN; pixels * c + 1];
+            channel_mul(&mut y, &x, &gate, pixels, c);
+            for (i, &v) in y[..pixels * c].iter().enumerate() {
+                assert_eq!(v.to_bits(), (x[i] * gate[i % c]).to_bits(), "c={c} at {i}");
+            }
+            assert!(y[pixels * c].is_nan(), "c={c}: wrote past the tensor");
         }
     }
 

@@ -25,6 +25,13 @@
 //! output is raw logits that reach +-650 on this noise image, where tiers
 //! legitimately differ by 0.17; it is compared after the sigmoid its consumer
 //! applies, with the same 0.005 tolerance, as a mask probability.
+//!
+//! The landscape selfie segmenter golden (2026-10-07) is the tier-0 output
+//! of its format-4 plan. On this noise image the person mask is almost all
+//! background: 99.6% of the probabilities are below 1e-6, where a broken
+//! layer cannot move them by 0.005. So its probabilities are also compared by
+//! their natural logarithm wherever both are at least 1e-30, again within
+//! 0.005; tiers differ there by at most 0.0012.
 
 use std::path::Path;
 
@@ -56,12 +63,14 @@ fn expected(name: &str) -> Vec<f32> {
         .collect()
 }
 
-/// How an output is compared: as produced, or as the probability a logit
-/// output becomes after its consumer's sigmoid.
+/// How an output is compared: as produced, as the probability a logit
+/// output becomes after its consumer's sigmoid, or as a probability and also
+/// by its logarithm (see the module notes).
 #[derive(Clone, Copy)]
 enum Scale {
     Raw,
     Logit,
+    Probability,
 }
 
 /// Run one plan on the fixed image and compare every declared output.
@@ -87,14 +96,17 @@ fn check(relative: &str, expectations: &[(usize, &str, Scale)]) {
         let got = model.output(index);
         assert_eq!(got.len(), want.len(), "{name}: wrong number of values");
         let seen = |v: f32| match scale {
-            Scale::Raw => v,
+            Scale::Raw | Scale::Probability => v,
             Scale::Logit => 1.0 / (1.0 + (-v).exp()),
         };
         let mut worst = (0usize, 0.0f32);
         for (i, (&g, &e)) in got.iter().zip(&want).enumerate() {
             assert!(e.is_finite(), "{name}: expected value {i} is {e}");
             assert!(g.is_finite(), "{name}: value {i} is {g}");
-            let gap = (seen(g) - seen(e)).abs();
+            let mut gap = (seen(g) - seen(e)).abs();
+            if matches!(scale, Scale::Probability) && g.min(e) >= 1.0e-30 {
+                gap = gap.max((g.ln() - e.ln()).abs());
+            }
             if gap > worst.1 {
                 worst = (i, gap);
             }
@@ -197,6 +209,14 @@ fn the_holistic_face_mesh_still_matches_the_recording() {
             (0, "holistic_face_landmarks.bin", Scale::Raw),
             (1, "holistic_face_landmarks_score.bin", Scale::Raw),
         ],
+    );
+}
+
+#[test]
+fn the_landscape_selfie_mask_still_matches_the_recording() {
+    check(
+        "plans/selfie_segmenter_landscape/selfie_segmenter_landscape.mpplan",
+        &[(0, "selfie_segmenter_landscape.bin", Scale::Probability)],
     );
 }
 

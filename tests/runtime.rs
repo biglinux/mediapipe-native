@@ -47,6 +47,7 @@ fn models_allocate_nothing_on_first_frame_or_after_thread_transfer() {
         "plans/pose_landmarks/pose_landmarks_detector.mpplan",
         "plans/holistic_face_landmarks/face_landmarks_detector.mpplan",
         "plans/face_blendshapes/face_blendshapes.mpplan",
+        "plans/selfie_segmenter_landscape/selfie_segmenter_landscape.mpplan",
     ] {
         let mut model = Model::load(&Path::new(env!("CARGO_MANIFEST_DIR")).join(name)).unwrap();
         model.input_mut().fill(0.5);
