@@ -28,32 +28,12 @@ sha256sums=('SKIP'
 prepare() {
     cd "${srcdir}/${pkgname}" || return
     cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
-    for bundle in face_landmarker hand_landmarker holistic_landmarker; do
-        mkdir -p "${srcdir}/${bundle}"
-        bsdtar -xf "${srcdir}/${bundle}.task" -C "${srcdir}/${bundle}"
-    done
-}
-
-# _export BUNDLE/MODEL PLAN_DIR [exporter options]
-_export() {
-    python tools/export_tflite.py "${srcdir}/$1.tflite" "plans/$2" \
-        --source "MediaPipe ${1%%/*}.task ${1#*/}.tflite (float16/1)" "${@:3}"
 }
 
 build() {
     cd "${srcdir}/${pkgname}" || return
     cargo build --frozen --release --bin mpbench
-    _export face_landmarker/face_detector face_detector --format 1
-    _export face_landmarker/face_landmarks_detector face_landmarks --format 1
-    _export hand_landmarker/hand_detector hand_detector
-    _export hand_landmarker/hand_landmarks_detector hand_landmarks
-    _export holistic_landmarker/hand_roi_refinement hand_roi_refinement
-    _export holistic_landmarker/pose_detector pose_detector
-    _export holistic_landmarker/pose_landmarks_detector pose_landmarks
-    _export holistic_landmarker/face_landmarks_detector holistic_face_landmarks
-    _export holistic_landmarker/face_blendshapes face_blendshapes
-    python tools/export_tflite.py "${srcdir}/selfie_segmenter_landscape.tflite" plans/selfie_segmenter_landscape \
-        --source "MediaPipe image_segmenter selfie_segmenter_landscape.tflite (float16/1)"
+    tools/export_plans.sh plans "${srcdir}"
 }
 
 check() {
