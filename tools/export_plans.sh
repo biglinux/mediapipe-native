@@ -47,5 +47,7 @@ export_plan holistic_landmarker/pose_detector pose_detector
 export_plan holistic_landmarker/pose_landmarks_detector pose_landmarks
 export_plan holistic_landmarker/face_landmarks_detector holistic_face_landmarks
 export_plan holistic_landmarker/face_blendshapes face_blendshapes
-python3 tools/export_tflite.py "$DOWNLOADS/selfie_segmenter_landscape.tflite" "$DEST/selfie_segmenter_landscape" \
-    --source "MediaPipe image_segmenter selfie_segmenter_landscape.tflite (float16/1)"
+for model in selfie_segmenter selfie_segmenter_landscape; do
+    python3 tools/export_tflite.py "$DOWNLOADS/$model.tflite" "$DEST/$model" \
+        --source "MediaPipe image_segmenter $model.tflite (float16/1)"
+done

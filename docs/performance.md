@@ -23,10 +23,12 @@ load, and were not repeated because the host stayed loaded.
 | pose_landmarks | 4.94 ms | 5.87 ms | 33.9 ms |
 | holistic_face_landmarks | 0.80 ms | 0.99 ms | 5.4 ms |
 | face_blendshapes | 0.64 ms | 0.83 ms | 4.7 ms |
-| selfie_segmenter_landscape | 0.95 ms | 1.13 ms | not measured |
+| selfie_segmenter | 1.81 ms | 2.11 ms | not measured |
+| selfie_segmenter_landscape | 0.97 ms | 1.16 ms | not measured |
 
-The selfie segmenter row is the build of 2026-10-07, on CPU 4 (a performance
-core) with light background load; tiers 1 and 0 took 2.57 and 15.1 ms, and
+The selfie segmenter rows are the build of 2026-10-29, on CPU 4 (a
+performance core) with light background load, median of three runs. On
+2026-10-07 the landscape plan's tiers 1 and 0 took 2.57 and 15.1 ms, and
 single-threaded TensorFlow Lite with XNNPACK 1.39 ms on the same core.
 
 The i3-2375M (Sandy Bridge, 2011) is the reason tier 2 exists: it has AVX but

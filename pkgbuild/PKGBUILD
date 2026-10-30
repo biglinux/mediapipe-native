@@ -14,15 +14,17 @@ source=("git+${url}.git"
         "${_models}/face_landmarker/face_landmarker/float16/1/face_landmarker.task"
         "${_models}/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task"
         "${_models}/holistic_landmarker/holistic_landmarker/float16/1/holistic_landmarker.task"
+        "${_models}/image_segmenter/selfie_segmenter/float16/1/selfie_segmenter.tflite"
         "${_models}/image_segmenter/selfie_segmenter_landscape/float16/1/selfie_segmenter_landscape.tflite")
 # .task files are zip archives whose model names repeat between bundles; the
 # .tflite ends in a zip of its label file, which the exporter does not need.
 noextract=('face_landmarker.task' 'hand_landmarker.task' 'holistic_landmarker.task'
-           'selfie_segmenter_landscape.tflite')
+           'selfie_segmenter.tflite' 'selfie_segmenter_landscape.tflite')
 sha256sums=('SKIP'
             '64184e229b263107bc2b804c6625db1341ff2bb731874b0bcc2fe6544e0bc9ff'
             'fbc2a30080c3c557093b5ddfc334698132eb341044ccee322ccf8bcf3607cde1'
             'e2dab61191e2dcd0a15f943d8e3ed1dce13c82dfa597b9dd39f562975a50c3f8'
+            '191ac9529ae506ee0beefa6b2c945a172dab9d07d1e802a290a4e4038226658b'
             '490e9ea734313e0de10fa0cd9e3c6133e36ea4db2b7a49bde9ef019f72796b8e')
 
 prepare() {

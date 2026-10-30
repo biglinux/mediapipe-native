@@ -84,8 +84,8 @@ that licence and the provenance of the model with them.
      ("Model Card BlazePose GHUM 3D"), hand ROI refinement, the 192-pixel face
      mesh and the face blendshapes model.
      https://ai.google.dev/edge/mediapipe/solutions/vision/holistic_landmarker
-   - Image Segmenter: the selfie segmenter, landscape ("Model Card MediaPipe
-     Selfie Segmentation").
+   - Image Segmenter: the selfie segmenter, square and landscape ("Model Card
+     MediaPipe Selfie Segmentation").
      https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter
 
    All of them are converted with tools/export_tflite.py, from the .task

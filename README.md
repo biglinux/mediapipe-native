@@ -25,7 +25,7 @@ eye input on a 2011 laptop.
 | Palm detector, hand landmarks | `hand_detector`, `hand_landmarks` | 192², 224² | 6.27, 6.51 ms | 43.2, 43.8 ms |
 | Pose detector, pose landmarks + segmentation | `pose_detector`, `pose_landmarks` | 224², 256² | 8.36, 4.94 ms | 56.1, 33.9 ms |
 | Holistic face mesh, blendshapes, hand ROI | three plans | 192², 146×2, 256² | 0.80, 0.64, 0.38 ms | 5.4, 4.7, 2.5 ms |
-| Selfie segmentation (person mask, landscape) | `selfie_segmenter_landscape` | 256×144 | 0.95 ms | not measured |
+| Selfie segmentation (person mask), square and landscape | `selfie_segmenter`, `selfie_segmenter_landscape` | 256², 256×144 | 1.81, 0.97 ms | not measured |
 
 CPU time per frame on one thread, median of six interleaved runs
 ([performance](docs/performance.md)). The crate runs the networks only:
@@ -45,7 +45,7 @@ and are converted into *plans* (`.mpplan` files) under the ignored `plans/`
 directory. [Getting started](docs/getting-started.md) shows how to download the
 MediaPipe bundles, export them, and run the tests. The package built by
 [`pkgbuild/PKGBUILD`](pkgbuild/PKGBUILD) does the same from pinned bundles and
-installs the ten plans under `/usr/share/mediapipe-native/` with `mpbench`.
+installs the eleven plans under `/usr/share/mediapipe-native/` with `mpbench`.
 Then time a plan:
 
 ```bash

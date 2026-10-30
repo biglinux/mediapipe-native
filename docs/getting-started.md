@@ -31,7 +31,7 @@ run never means inference was skipped.
 |---|---|---|
 | `face_detector`, `face_landmarks` | `tools/export_tflite.py --format 1` | `.tflite` files inside the MediaPipe Face Landmarker bundle |
 | hand, pose, holistic (seven plans) | `tools/export_tflite.py` | `.tflite` files inside the MediaPipe Tasks bundles |
-| `selfie_segmenter_landscape` | `tools/export_tflite.py` | `selfie_segmenter_landscape.tflite`, a model of its own ([guide](models/selfie-segmenter.md)) |
+| `selfie_segmenter`, `selfie_segmenter_landscape` | `tools/export_tflite.py` | `selfie_segmenter.tflite` and `selfie_segmenter_landscape.tflite`, models of their own ([guide](models/selfie-segmenter.md)) |
 
 The bundles download directly from Google's model storage; the model guides
 ([hand, pose and holistic](models/hand-pose-holistic.md),
