@@ -751,10 +751,18 @@ class TfliteExporter(export_graph.Exporter):
         )
 
     def on_max_pool_2d(self, op) -> None:
+        self.pool(op, "maxpool")
+
+    def on_average_pool_2d(self, op) -> None:
+        self.pool(op, "avgpool")
+
+    def pool(self, op, kind: str) -> None:
+        """Pooling over windows that lie inside the image, as SAME pads none
+        when the windows fit."""
         x, out = self.inputs(op)[0], self.outputs(op)[0]
         o = options(op, S.Pool2DOptions)
         if ACTIVATION[o.FusedActivationFunction()] != "NONE":
-            raise SystemExit("max pooling with a fused activation is unsupported")
+            raise SystemExit("pooling with a fused activation is unsupported")
         kh, kw, sh, sw = o.FilterHeight(), o.FilterWidth(), o.StrideH(), o.StrideW()
         ih, iw, ic = self.hwc_of(x)
         oh, ow, oc = self.record(out)
@@ -764,9 +772,9 @@ class TfliteExporter(export_graph.Exporter):
             or (oh - 1) * sh + kh > ih
             or (ow - 1) * sw + kw > iw
         ):
-            raise SystemExit("padded max pooling is unsupported")
+            raise SystemExit("padded pooling is unsupported")
         self.emit(
-            "maxpool",
+            kind,
             self.names[x],
             self.names[out],
             kh=kh,
