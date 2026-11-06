@@ -1,17 +1,16 @@
 # mediapipe-native
 
 Run Google MediaPipe's face, hand, pose and selfie-segmentation models on the
-CPU from Rust, with no inference runtime underneath — fast enough for head and
+CPU from Rust, with no inference runtime underneath. Fast enough for head and
 eye input on a 2011 laptop.
 
 - **One small dependency tree.** Only `serde` and `serde_json`. No TensorFlow
   Lite, ONNX Runtime or OpenVINO.
-- **Old CPUs are first-class.** Kernels for AVX2+FMA, AVX, SSE4.1 and scalar,
-  chosen at run time. The AVX path works on Sandy Bridge, which has no AVX2,
-  FMA or F16C.
+- **Old CPUs are first-class.** Kernels for AVX2+FMA, AVX, SSE4.1 and plain
+  Rust, chosen at run time. The AVX path is tuned on Sandy Bridge, which has
+  no AVX2, FMA or F16C.
 - **Predictable frames.** One thread, buffers reserved at load time, zero
-  allocations per frame — from the first frame on, and after moving the model to
-  another thread.
+  allocations per frame, from the first frame on.
 - **Checkable results.** Committed reference outputs, bit-for-bit comparison
   within each instruction set, and parity tools against TensorFlow Lite and a
   float64 reference.
@@ -77,12 +76,13 @@ fn main() -> Result<(), mediapipe_native::Error> {
 
 Inputs are NHWC `f32` in RGB order, in each model's own value range. Outputs
 borrow the model until the next mutable call, so copy what you need before
-writing the next frame. [Architecture](docs/architecture.md) covers the
-contracts, plan formats and instruction-set tiers.
+writing the next frame. A model can be built on one thread and run on another.
+[Architecture](docs/architecture.md) covers the contracts, plan formats and
+instruction-set tiers.
 
 Never ship a binary built with a global `target-cpu=native` or forced target
-features: tier selection at run time is what keeps one binary correct on every
-CPU. `MEDIAPIPE_NATIVE_TIER=0..3` caps the tier for testing.
+features: choosing the tier at run time is what keeps one binary correct on
+every CPU. `MEDIAPIPE_NATIVE_TIER=0..3` caps the tier for testing.
 
 ## Development
 
