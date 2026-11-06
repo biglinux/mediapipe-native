@@ -64,7 +64,17 @@ CONSTANT_PRODUCERS = ("DEQUANTIZE", "DENSIFY")
 # Operations only plan format 4 holds.
 FORMAT4_KINDS = ("hardswish", "channelmul")
 # Operations plan format 1 lacks, as `Plan::check` refuses them there.
-FORMAT3_KINDS = ("avgpool", "clip", "resize", "depthtospace", "channelslice")
+FORMAT3_KINDS = (
+    "avgpool",
+    "clip",
+    "resize",
+    "depthtospace",
+    "channelslice",
+    "transpose",
+    "layernorm",
+    "centerscale",
+    "constconcat",
+)
 # TfLitePadding, as MediaPipe's custom operations store it in raw options.
 TFLITE_PADDING_SAME, TFLITE_PADDING_VALID = 1, 2
 
