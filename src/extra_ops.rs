@@ -69,19 +69,38 @@ pub(crate) fn resize_bilinear(op: &Op, x: &[f32], y: &mut [f32]) {
 }
 
 /// TFLite `DEPTH_TO_SPACE`: channel group `i * b + j` of input pixel (y, x)
-/// becomes output pixel (y * b + i, x * b + j).
+/// becomes output pixel (y * b + i, x * b + j). Groups `i * b .. i * b + b`
+/// are adjacent in both tensors, so each output row is filled with runs of
+/// `b * c` floats.
 pub(crate) fn depth_to_space(op: &Op, x: &[f32], y: &mut [f32]) {
     let (b, c) = (op.oh / op.ih, op.oc);
     for iy in 0..op.ih {
-        for ix in 0..op.iw {
-            for i in 0..b {
-                for j in 0..b {
-                    let src = (iy * op.iw + ix) * op.ic + (i * b + j) * c;
-                    let dst = ((iy * b + i) * op.ow + ix * b + j) * c;
-                    y[dst..dst + c].copy_from_slice(&x[src..src + c]);
+        let src = &x[iy * op.iw * op.ic..][..op.iw * op.ic];
+        for i in 0..b {
+            let out = &mut y[(iy * b + i) * op.ow * c..][..op.ow * c];
+            // Short runs take a constant length, so they compile to inline
+            // moves instead of a copy call per run.
+            match b * c {
+                2 => copy_runs::<2>(out, src, op.ic, i),
+                run => {
+                    for (dst, pixel) in out.chunks_exact_mut(run).zip(src.chunks_exact(op.ic)) {
+                        dst.copy_from_slice(&pixel[i * run..][..run]);
+                    }
                 }
             }
         }
+    }
+}
+
+/// Run `i` of `R` floats from each `ic`-float pixel of `src`, end to end.
+fn copy_runs<const R: usize>(out: &mut [f32], src: &[f32], ic: usize, i: usize) {
+    for (dst, pixel) in out
+        .as_chunks_mut::<R>()
+        .0
+        .iter_mut()
+        .zip(src.chunks_exact(ic))
+    {
+        dst.copy_from_slice(&pixel[i * R..][..R]);
     }
 }
 

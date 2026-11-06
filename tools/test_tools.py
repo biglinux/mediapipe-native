@@ -166,6 +166,94 @@ class ActivationFolding(unittest.TestCase):
         )
         self.assertEqual([o["kind"] for o in ops], ["conv", "prelu", "add"])
 
+    def test_prelu_stays_after_a_clip(self):
+        # The clip runs first in the source; a folded PReLU would run first.
+        ops = self.exporter(
+            [
+                {"kind": "conv", "_x": "in", "_y": "c", "clip": [0.0, 6.0]},
+                {"kind": "prelu", "_x": "c", "_y": "p", "w": [-0.5]},
+            ]
+        )
+        self.assertEqual([o["kind"] for o in ops], ["conv", "prelu"])
+
+
+@unittest.skipUnless(
+    importlib.util.find_spec("tensorflow"), "the TFLite exporter needs tensorflow"
+)
+class TfliteLowering(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        import numpy
+
+        def load(name):
+            spec = importlib.util.spec_from_file_location(
+                name, ROOT / f"tools/{name}.py"
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+
+        cls.export, cls.np = load("export_tflite"), numpy
+        cls.run_numpy = load("run_numpy")
+
+    def fold(self, ops, plan_format):
+        exporter = self.export.TfliteExporter.__new__(self.export.TfliteExporter)
+        exporter.ops, exporter.format = ops, plan_format
+        exporter.graph = type("Graph", (), {"output": []})()
+        exporter.fold_into_producers()
+        return exporter.ops
+
+    def test_activations_fold_in_format_four(self):
+        def ops():
+            return [
+                {"kind": "conv", "_x": "in", "_y": "c"},
+                {"kind": "maxpool", "_x": "in", "_y": "m"},
+                {"kind": "hardswish", "_x": "c", "_y": "h"},
+                {"kind": "conv", "_x": "h", "_y": "blocks"},
+                {"kind": "depthtospace", "_x": "blocks", "_y": "space"},
+                {"kind": "sigmoid", "_x": "space", "_y": "out"},
+            ]
+
+        folded = self.fold(ops(), 4)
+        self.assertEqual(
+            [(o["kind"], o.get("fused")) for o in folded],
+            [
+                ("conv", "hardswish"),
+                ("maxpool", None),
+                ("conv", "sigmoid"),
+                ("depthtospace", None),
+            ],
+        )
+        self.assertEqual((folded[0]["_y"], folded[2]["_y"]), ("h", "blocks"))
+        self.assertEqual((folded[3]["_x"], folded[3]["_y"]), ("blocks", "out"))
+        self.assertEqual(
+            [o["kind"] for o in self.fold(ops(), 3)], [o["kind"] for o in ops()]
+        )
+
+    def test_transposed_conv_matches_mediapipe(self):
+        np = self.np
+        rng = np.random.default_rng(7)
+        h, w, ic, oc, k = 3, 5, 6, 2, 2
+        x = rng.standard_normal((h, w, ic))
+        weights = rng.standard_normal((oc, k, k, ic))
+        bias = rng.standard_normal(oc)
+        # MediaPipe's TransposeConvBias: out[y*k + i, x*k + j, o] = bias[o] +
+        # sum over c of in[y, x, c] * weights[o, i, j, c].
+        want = np.empty((h * k, w * k, oc))
+        for i in range(k):
+            for j in range(k):
+                want[i::k, j::k] = x @ weights[:, i, j].T + bias
+        packed, tiled = self.export.blocks_as_pointwise(weights, bias)
+        op = {"ih": h, "iw": w, "ic": k * k * oc, "oh": h * k, "ow": w * k, "oc": oc}
+        blocks = (x @ packed + tiled).reshape(-1)
+        plan = {
+            "input": {"slot": 0, "h": h, "w": w, "c": k * k * oc},
+            "outputs": [{"slot": 1, "n": want.size}],
+            "ops": [{"kind": "depthtospace", "x": 0, "y": 1, **op}],
+        }
+        got, _ = self.run_numpy.run(plan, np.zeros(0), blocks, dtype=np.float64)
+        np.testing.assert_allclose(got[0], want.reshape(-1), rtol=1e-12, atol=1e-12)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

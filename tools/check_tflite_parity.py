@@ -37,6 +37,7 @@ import numpy as np
 import tensorflow as tf
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import export_tflite
 import run_numpy
 
 
@@ -107,10 +108,12 @@ def main() -> int:
             command.append("--allow-nonfinite")
         subprocess.run(command, check=True, stdout=subprocess.DEVNULL)
 
-    interpreter = tf.lite.Interpreter(model_path=str(args.model), num_threads=1)
+    # MediaPipe's custom transposed convolution runs as TFLite's builtin one.
+    model = export_tflite.runnable(args.model.read_bytes())
+    interpreter = tf.lite.Interpreter(model_content=model, num_threads=1)
     interpreter.allocate_tensors()
     reference = tf.lite.Interpreter(
-        model_path=str(args.model),
+        model_content=model,
         num_threads=1,
         experimental_op_resolver_type=tf.lite.experimental.OpResolverType.BUILTIN_REF,
     )

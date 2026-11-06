@@ -2,8 +2,8 @@ mediapipe-native
 Copyright 2026 Bruno Gonçalves <www.biglinux.com.br>
 
 This crate is an independent Rust implementation of the inference path for
-Google MediaPipe vision models. Only that implementation — the executor,
-kernels, plan format, exporters and tools in this repository — is the work of
+Google MediaPipe vision models. Only that implementation (the executor,
+kernels, plan format, exporters and tools in this repository) is the work of
 its author and is provided under MIT OR Apache-2.0. The models themselves, their
 architectures and their trained weights are the work of the people credited
 in sections 2 and 3, and part of the kernel design derives from the work
@@ -33,6 +33,13 @@ that licence and the provenance of the model with them.
    src/extra_ops.rs, written from the ONNX and TensorFlow Lite operator
    definitions.
 
+   The folded sigmoid and hard-swish of format 4 compute as XNNPACK's
+   f32-vsigmoid (rr1/rr2-p5-div) and f32-vhswish kernels do for finite
+   values: the same constants, argument reduction and order of operations,
+   written anew in Rust. XNNPACK is by Facebook, Inc. and its affiliates and
+   Google LLC (BSD-3-Clause); its licence follows as notice A.
+   https://github.com/google/XNNPACK
+
 2. MediaPipe models (Apache-2.0).
 
    The models this crate runs were designed and trained by Google's MediaPipe
@@ -60,6 +67,8 @@ that licence and the provenance of the model with them.
      Zhdanovich, Matthias Grundmann, Cristian Sminchisescu. "BlazePose GHUM
      Holistic: Real-time 3D Human Landmarks and Pose Estimation", 2022.
      https://arxiv.org/abs/2206.11678
+   - Tingbo Hou, Siargey Pisarchyk, Karthik Raveendran. "Model Card MediaPipe
+     Selfie Segmentation", Google, 2021.
 
    Every model was downloaded from Google's MediaPipe solutions guide,
    https://developers.google.com/edge/mediapipe/solutions/guide. The plans are
@@ -75,11 +84,16 @@ that licence and the provenance of the model with them.
      ("Model Card BlazePose GHUM 3D"), hand ROI refinement, the 192-pixel face
      mesh and the face blendshapes model.
      https://ai.google.dev/edge/mediapipe/solutions/vision/holistic_landmarker
+   - Image Segmenter: the selfie segmenter, square and landscape ("Model Card
+     MediaPipe Selfie Segmentation").
+     https://ai.google.dev/edge/mediapipe/solutions/vision/image_segmenter
 
-   All of them are converted with tools/export_tflite.py from the .task
-   bundles; docs/models/hand-pose-holistic.md lists the download URLs
-   and SHA-256 of every file. Preserve the Apache-2.0 licence and the
-   provenance of each model alongside any converted plan you ship.
+   All of them are converted with tools/export_tflite.py, from the .task
+   bundles or, for the selfie segmenter, the .tflite file;
+   docs/models/hand-pose-holistic.md and docs/models/selfie-segmenter.md list
+   the download URLs and SHA-256 of every file. Preserve the Apache-2.0
+   licence and the provenance of each model alongside any converted plan you
+   ship.
 
    tests/reference/*.bin are outputs of these models computed by this crate
    from synthetic, seeded input images (see tests/reference.rs). They contain
@@ -95,5 +109,41 @@ that licence and the provenance of the model with them.
 
    No ONNX Runtime, OpenVINO, TensorFlow Lite or other inference runtime is
    linked or called by the crate. The development tools in tools/ use NumPy,
-   ONNX, ONNX Runtime and TensorFlow, installed
-   separately, to convert models and cross-check results.
+   ONNX, ONNX Runtime, TensorFlow and FlatBuffers, installed separately, to
+   convert models and cross-check results, and LiteRT to time the same models
+   (tools/bench_litert.py).
+
+
+A. XNNPACK, https://github.com/google/XNNPACK
+
+BSD License
+
+For XNNPACK software
+
+Copyright (c) Facebook, Inc. and its affiliates. All rights reserved.
+Copyright 2019 Google LLC
+
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+
+ * Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+ * Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+ * Neither the name Facebook nor the names of its contributors may be used to
+   endorse or promote products derived from this software without specific
+   prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR
+ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
+ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

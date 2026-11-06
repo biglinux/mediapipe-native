@@ -130,7 +130,7 @@ landmark sets with every point in one place, where the model divides zero by
 zero. On AVX tiers ReLU turns that NaN into 0, as TFLite does; tiers 0 and 1
 use the scalar ReLU, which preserves NaN. Real landmarks never coincide.
 
-`cargo test --test reference` checks all nine plans against tier-0 goldens in
+`cargo test --test reference` checks these seven plans against tier-0 goldens in
 `tests/reference/` with a 0.005 tolerance (segmentation compared as
 sigmoid probability), and `--test runtime` proves zero allocations for all of
 them. Both fail when a plan is missing.

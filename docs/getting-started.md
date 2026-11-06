@@ -31,31 +31,24 @@ run never means inference was skipped.
 |---|---|---|
 | `face_detector`, `face_landmarks` | `tools/export_tflite.py --format 1` | `.tflite` files inside the MediaPipe Face Landmarker bundle |
 | hand, pose, holistic (seven plans) | `tools/export_tflite.py` | `.tflite` files inside the MediaPipe Tasks bundles |
+| `selfie_segmenter`, `selfie_segmenter_landscape` | `tools/export_tflite.py` | `selfie_segmenter.tflite` and `selfie_segmenter_landscape.tflite`, models of their own ([guide](models/selfie-segmenter.md)) |
 
-The hand, pose and holistic bundles download directly from Google's model
-storage; [the model guide](models/hand-pose-holistic.md) has the URLs, hashes
-and the plan directory names the tests expect. The face plans keep plan format 1,
-whose schedule their reference outputs pin:
+The bundles download directly from Google's model storage; the model guides
+([hand, pose and holistic](models/hand-pose-holistic.md),
+[selfie segmenter](models/selfie-segmenter.md)) have the URLs, hashes and the
+plan directory names the tests expect. The face plans keep plan format 1, whose
+schedule their reference outputs pin. `tools/export_plans.sh` downloads the
+bundles the package recipe names, checks their SHA-256 and exports every plan
+into `plans/`, or into the directory given as its argument:
 
 ```bash
-mkdir -p plans/_downloads && cd plans/_downloads
-curl -fLO https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task
-curl -fLO https://storage.googleapis.com/mediapipe-models/holistic_landmarker/holistic_landmarker/float16/1/holistic_landmarker.task
-curl -fLO https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
-sha256sum *.task   # compare with docs/models/hand-pose-holistic.md
-python3 -c "import zipfile; [zipfile.ZipFile(f).extractall(f[:-5]) for f in ('hand_landmarker.task', 'holistic_landmarker.task', 'face_landmarker.task')]"
-cd ../..
-python3 tools/export_tflite.py plans/_downloads/face_landmarker/face_detector.tflite \
-  plans/face_detector --format 1 --source "MediaPipe face_landmarker.task face_detector.tflite"
-python3 tools/export_tflite.py plans/_downloads/face_landmarker/face_landmarks_detector.tflite \
-  plans/face_landmarks --format 1 --source "MediaPipe face_landmarker.task face_landmarks_detector.tflite"
-python3 tools/export_tflite.py plans/_downloads/holistic_landmarker/pose_landmarks_detector.tflite \
-  plans/pose_landmarks --source "MediaPipe holistic_landmarker.task pose_landmarks_detector.tflite"
+tools/export_plans.sh
 ```
 
-TensorFlow (for the exporter) is needed only
-for this step. A `.tflite` file is not a plan; never rename one or substitute a
-different face model for the one a plan was exported from.
+This step alone needs the exporter's Python modules (TensorFlow, ONNX,
+FlatBuffers and NumPy), `curl` and `bsdtar`. A `.tflite` file is not a plan;
+never rename one or substitute a different face model for the one a plan was
+exported from.
 
 ## Input and output contract
 
@@ -63,7 +56,7 @@ different face model for the one a plan was exported from.
 Fill the input before every frame: its storage is reused as scratch later in
 the graph. Use RGB and each model's own value range; the face detector and the
 face mesh expect different normalization, so read the export metadata instead
-of applying one normalizer to both.
+of applying one normalizer to both. The selfie segmenter takes RGB in [0, 1].
 
 Outputs borrow model storage until the next mutable call. Copy what you need
 before writing the next input. The face mesh returns 478 × XYZ plus global

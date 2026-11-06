@@ -25,6 +25,18 @@
 //! output is raw logits that reach +-650 on this noise image, where tiers
 //! legitimately differ by 0.17; it is compared after the sigmoid its consumer
 //! applies, with the same 0.005 tolerance, as a mask probability.
+//!
+//! The landscape selfie segmenter golden (2026-10-07) is the tier-0 output
+//! of its format-4 plan. On this noise image the person mask is almost all
+//! background: 99.6% of the probabilities are below 1e-6, where a broken
+//! layer cannot move them by 0.005. So its probabilities are also compared by
+//! their natural logarithm wherever either is at least 1e-30, the other
+//! read as 1e-30 when it is smaller, again within
+//! 0.005; tiers differ there by at most 0.0012. The square segmenter's golden
+//! (2026-10-29) is recorded the same way; only 2% of its probabilities reach
+//! 1e-30 on this image, so its logits are compared too: the plan with the
+//! sigmoid folded into its last convolution cleared, against that plan's
+//! tier-0 output.
 
 use std::path::Path;
 
@@ -56,23 +68,34 @@ fn expected(name: &str) -> Vec<f32> {
         .collect()
 }
 
-/// How an output is compared: as produced, or as the probability a logit
-/// output becomes after its consumer's sigmoid.
+/// How an output is compared: as produced, as the probability a logit
+/// output becomes after its consumer's sigmoid, or as a probability and also
+/// by its logarithm (see the module notes).
 #[derive(Clone, Copy)]
 enum Scale {
     Raw,
     Logit,
+    Probability,
 }
 
-/// Run one plan on the fixed image and compare every declared output.
-fn check(relative: &str, expectations: &[(usize, &str, Scale)]) {
+/// The plan at `relative`, which must exist.
+fn plan_path(relative: &str) -> std::path::PathBuf {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
     assert!(
         path.exists(),
         "required plan is missing: {}",
         path.display()
     );
-    let mut model = Model::load(&path).expect("the plan should load");
+    path
+}
+
+/// Run one plan on the fixed image and compare every declared output.
+fn check(relative: &str, expectations: &[(usize, &str, Scale)]) {
+    let model = Model::load(&plan_path(relative)).expect("the plan should load");
+    check_model(model, expectations);
+}
+
+fn check_model(mut model: Model, expectations: &[(usize, &str, Scale)]) {
     let (h, w, c) = model.input_shape();
     model.input_mut().copy_from_slice(&fixed_image(h * w * c));
     model.run();
@@ -87,14 +110,19 @@ fn check(relative: &str, expectations: &[(usize, &str, Scale)]) {
         let got = model.output(index);
         assert_eq!(got.len(), want.len(), "{name}: wrong number of values");
         let seen = |v: f32| match scale {
-            Scale::Raw => v,
+            Scale::Raw | Scale::Probability => v,
             Scale::Logit => 1.0 / (1.0 + (-v).exp()),
         };
         let mut worst = (0usize, 0.0f32);
         for (i, (&g, &e)) in got.iter().zip(&want).enumerate() {
             assert!(e.is_finite(), "{name}: expected value {i} is {e}");
             assert!(g.is_finite(), "{name}: value {i} is {g}");
-            let gap = (seen(g) - seen(e)).abs();
+            let mut gap = (seen(g) - seen(e)).abs();
+            // Below the cutoff both read as the cutoff, so a value that
+            // collapsed to zero still shows in the logarithm.
+            if matches!(scale, Scale::Probability) && g.max(e) >= 1.0e-30 {
+                gap = gap.max((g.max(1.0e-30).ln() - e.max(1.0e-30).ln()).abs());
+            }
             if gap > worst.1 {
                 worst = (i, gap);
             }
@@ -197,6 +225,54 @@ fn the_holistic_face_mesh_still_matches_the_recording() {
             (0, "holistic_face_landmarks.bin", Scale::Raw),
             (1, "holistic_face_landmarks_score.bin", Scale::Raw),
         ],
+    );
+}
+
+#[test]
+fn the_selfie_mask_still_matches_the_recording() {
+    check(
+        "plans/selfie_segmenter/selfie_segmenter.mpplan",
+        &[(0, "selfie_segmenter.bin", Scale::Probability)],
+    );
+}
+
+#[test]
+fn the_selfie_logits_still_match_the_recording() {
+    let dir = plan_path("plans/selfie_segmenter");
+    let mut graph: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(dir.join("graph.json")).expect("graph.json"))
+            .expect("graph.json is JSON");
+    let ops = graph["ops"].as_array_mut().expect("the plan's operations");
+    let shuffle = ops
+        .iter()
+        .rposition(|op| op["kind"] == "depthtospace")
+        .expect("the plan ends in a depth-to-space");
+    let source = ops[shuffle]["x"].clone();
+    let conv = ops
+        .iter_mut()
+        .rev()
+        .find(|op| op["kind"] == "conv" && op["y"] == source)
+        .expect("a convolution feeds the depth-to-space");
+    assert_eq!(conv["fused"], "sigmoid");
+    conv.as_object_mut().expect("an operation").remove("fused");
+    let logits =
+        std::env::temp_dir().join(format!("mediapipe-native-logits-{}", std::process::id()));
+    std::fs::create_dir_all(&logits).expect("a scratch plan directory");
+    std::fs::write(logits.join("graph.json"), graph.to_string()).expect("graph.json written");
+    std::fs::copy(dir.join("weights.bin"), logits.join("weights.bin")).expect("weights copied");
+    let model = Model::load(&logits);
+    std::fs::remove_dir_all(&logits).expect("the scratch plan removed");
+    check_model(
+        model.expect("the plan without its last sigmoid should load"),
+        &[(0, "selfie_segmenter_logits.bin", Scale::Raw)],
+    );
+}
+
+#[test]
+fn the_landscape_selfie_mask_still_matches_the_recording() {
+    check(
+        "plans/selfie_segmenter_landscape/selfie_segmenter_landscape.mpplan",
+        &[(0, "selfie_segmenter_landscape.bin", Scale::Probability)],
     );
 }
 

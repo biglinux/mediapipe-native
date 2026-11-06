@@ -6,4 +6,5 @@
 | Find the code that owns something, and the rules it enforces | [Architecture](architecture.md) |
 | Know what a frame costs, or optimize a kernel | [Performance](performance.md) |
 | Run the hand, pose and holistic models | [Hand, pose and holistic models](models/hand-pose-holistic.md) |
+| Segment a person for background blur | [Selfie segmenter](models/selfie-segmenter.md) |
 | Contribute a change | [Contributing](../CONTRIBUTING.md) |

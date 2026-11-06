@@ -67,6 +67,11 @@ pub const FORMAT: &str = "mediapipe-native-plan/1";
 /// pooling, clamps, resize, depth-to-space, channel slices and the blendshape
 /// layers to format 1.
 pub const FORMAT_V3: &str = "mediapipe-native-plan/3";
+/// Format 3 plus what MediaPipe's selfie segmenter needs: hard-swish, the
+/// squeeze-and-excite multiply by a second tensor, and a ReLU, hard-swish or
+/// sigmoid folded into its producer (`fused`). An older binary would ignore
+/// `fused`, so these plans carry their own tag.
+pub const FORMAT_V4: &str = "mediapipe-native-plan/4";
 
 /// Ceiling on total scratch memory, in floats. The graphs this runs are a few
 /// megabytes; anything far past that means a corrupt or hostile file, and
@@ -118,6 +123,25 @@ pub enum Kind {
     Centerscale,
     /// The constant block `w`, then the input, end to end.
     Constconcat,
+    /// Hard-swish, `x * min(max(x / 6 + 1/2, 0), 1)`.
+    Hardswish,
+    /// Multiply every pixel's channels by the `oc` values of the second
+    /// input: a squeeze-and-excite gate.
+    Channelmul,
+}
+
+/// An activation without constants, folded into a convolution's or an
+/// addition's tail (format 4).
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Fused {
+    #[default]
+    None,
+    Relu,
+    Hardswish,
+    /// The logistic function as XNNPACK computes it, not the standalone
+    /// `Sigmoid`'s libm `exp`: see `ops::sigmoid_inplace`.
+    Sigmoid,
 }
 
 /// A position and length inside the weight file, in floats. `[0, 0]` means the
@@ -140,7 +164,8 @@ pub struct Op {
     pub kind: Kind,
     /// Scratch buffer holding the first input.
     pub x: usize,
-    /// Scratch buffer holding the second input, for `Add` and `Concat`.
+    /// Scratch buffer holding the second input, for `Add`, `Concat` and
+    /// `Channelmul`.
     #[serde(default)]
     pub x2: usize,
     /// Scratch buffer the result is written to.
@@ -181,6 +206,10 @@ pub struct Op {
     /// slopes (format 3: RELU6).
     #[serde(default)]
     pub clip: Block,
+    /// Activation folded into this operation's tail (format 4); never
+    /// together with `act` or `clip`.
+    #[serde(default)]
+    pub fused: Fused,
     /// Element count of the second input, for `Concat`.
     #[serde(default)]
     pub n2: usize,
@@ -360,10 +389,10 @@ impl Plan {
 
     /// Every consistency rule, in one place. `weight_floats` is the length of
     /// the weight file.
-    fn check(&self, weight_floats: usize) -> Result<()> {
-        if ![FORMAT, FORMAT_V3].contains(&self.format.as_str()) {
+    pub(crate) fn check(&self, weight_floats: usize) -> Result<()> {
+        if ![FORMAT, FORMAT_V3, FORMAT_V4].contains(&self.format.as_str()) {
             return Err(Error::Format(format!(
-                "found {:?}, this build reads {FORMAT:?} or {FORMAT_V3:?}",
+                "found {:?}, this build reads {FORMAT:?}, {FORMAT_V3:?} or {FORMAT_V4:?}",
                 self.format
             )));
         }
@@ -419,9 +448,14 @@ impl Plan {
                     | Kind::Layernorm
                     | Kind::Centerscale
                     | Kind::Constconcat
-            ) && self.format != FORMAT_V3
+            ) && self.format == FORMAT
             {
                 return Err(Error::Invalid(at("requires plan format 3")));
+            }
+            if (matches!(op.kind, Kind::Hardswish | Kind::Channelmul) || op.fused != Fused::None)
+                && self.format != FORMAT_V4
+            {
+                return Err(Error::Invalid(at("requires plan format 4")));
             }
             let input_len = shape_len(&[op.ih, op.iw, op.ic])
                 .ok_or_else(|| Error::Invalid(at("input shape is zero or overflows")))?;
@@ -469,6 +503,8 @@ impl Plan {
                     | Kind::Clip
                     | Kind::Layernorm
                     | Kind::Centerscale
+                    | Kind::Hardswish
+                    | Kind::Channelmul
             ) && (op.ih, op.iw, op.ic) != (op.oh, op.ow, op.oc)
             {
                 return Err(Error::Invalid(at("elementwise input/output shapes differ")));
@@ -560,14 +596,15 @@ impl Plan {
             // The executor holds a mutable view of the output buffer and a
             // shared view of the inputs at the same time. That is only sound
             // because no operation writes a buffer it is also reading.
-            if op.y == op.x || (matches!(op.kind, Kind::Add | Kind::Concat) && op.y == op.x2) {
+            let binary = matches!(op.kind, Kind::Add | Kind::Concat | Kind::Channelmul);
+            if op.y == op.x || (binary && op.y == op.x2) {
                 return Err(Error::Invalid(at("writes the buffer it reads")));
             }
-            if matches!(op.kind, Kind::Add | Kind::Concat) {
-                let need = if op.kind == Kind::Add {
-                    op.out_len()
-                } else {
-                    op.n2
+            if binary {
+                let need = match op.kind {
+                    Kind::Add => op.out_len(),
+                    Kind::Concat => op.n2,
+                    _ => op.oc,
                 };
                 if slot(op.x2, &at("second input"))? < need {
                     return Err(Error::Invalid(at("reads past its second input buffer")));
@@ -613,11 +650,18 @@ impl Plan {
                 return Err(Error::Invalid(at("has a folded slope of the wrong length")));
             }
             if !op.clip.is_empty()
-                && (self.format != FORMAT_V3
+                && (self.format == FORMAT
                     || op.clip.1 != 2
                     || !matches!(op.kind, Kind::Conv | Kind::Dwconv | Kind::Add))
             {
                 return Err(Error::Invalid(at("has an invalid folded clip")));
+            }
+            if op.fused != Fused::None
+                && (!matches!(op.kind, Kind::Conv | Kind::Dwconv | Kind::Add)
+                    || !op.act.is_empty()
+                    || !op.clip.is_empty())
+            {
+                return Err(Error::Invalid(at("has an invalid folded activation")));
             }
             if op.kind == Kind::Padc && op.oc < op.ic {
                 return Err(Error::Invalid(at("pads to fewer channels than it has")));
@@ -698,6 +742,7 @@ mod tests {
             ops: vec![Op {
                 begin: 0,
                 clip: Block::default(),
+                fused: Fused::None,
                 kind: Kind::Conv,
                 x: 0,
                 x2: 0,
@@ -760,7 +805,9 @@ mod tests {
         let mut plan = minimal();
         plan.format = FORMAT_V3.into();
         assert!(plan.check(20).is_ok());
-        plan.format = "mediapipe-native-plan/4".into();
+        plan.format = FORMAT_V4.into();
+        assert!(plan.check(20).is_ok());
+        plan.format = "mediapipe-native-plan/5".into();
         assert!(matches!(plan.check(20), Err(Error::Format(_))));
     }
 
@@ -839,6 +886,78 @@ mod tests {
         (weights[16], weights[17]) = (6.0, 0.0);
         assert!(norm.check(20).is_ok());
         assert!(norm.check_constants(&weights).is_err());
+    }
+
+    #[test]
+    fn format_four_ops_need_format_four() {
+        // The minimal 2x2x4 convolution, its bias dropped, in format 4, as a
+        // hard-swish, as a gate of the image (slot 0) by slot 2's four
+        // floats, or with a folded activation.
+        let base = || {
+            let mut plan = minimal();
+            plan.format = FORMAT_V4.into();
+            plan.ops[0].b = Block::default();
+            plan
+        };
+        let hardswish = || {
+            let mut plan = base();
+            (plan.ops[0].kind, plan.ops[0].w) = (Kind::Hardswish, Block::default());
+            plan
+        };
+        let gate = || {
+            let mut plan = base();
+            plan.pool.push(4);
+            let op = &mut plan.ops[0];
+            (op.kind, op.w, op.x2) = (Kind::Channelmul, Block::default(), 2);
+            plan
+        };
+        let fused = |kind: Fused| {
+            let mut plan = base();
+            plan.ops[0].fused = kind;
+            plan
+        };
+        let valid = [
+            ("hard-swish", hardswish()),
+            ("channel multiply", gate()),
+            ("folded ReLU", fused(Fused::Relu)),
+            ("folded hard-swish", fused(Fused::Hardswish)),
+            ("folded sigmoid", fused(Fused::Sigmoid)),
+        ];
+        for (what, mut plan) in valid {
+            assert!(plan.check(20).is_ok(), "{what} refused in format 4");
+            for older in [FORMAT, FORMAT_V3] {
+                plan.format = older.into();
+                assert!(plan.check(20).is_err(), "{what} accepted in {older}");
+            }
+        }
+        let mut bad = vec![];
+        let mut plan = hardswish();
+        plan.ops[0].ow = 1;
+        bad.push(("hard-swish that changes shape", plan));
+        let mut plan = gate();
+        plan.ops[0].oc = 2;
+        bad.push(("gate that changes shape", plan));
+        let mut plan = gate();
+        plan.pool[2] = 3;
+        bad.push(("gate shorter than the channels", plan));
+        let mut plan = gate();
+        plan.ops[0].x2 = 1;
+        bad.push(("gate written in place", plan));
+        let mut plan = gate();
+        plan.ops[0].x2 = 9;
+        bad.push(("gate from a missing buffer", plan));
+        let mut plan = fused(Fused::Sigmoid);
+        plan.ops[0].kind = Kind::Relu;
+        bad.push(("folded activation on a ReLU", plan));
+        let mut plan = fused(Fused::Hardswish);
+        plan.ops[0].clip = Block(16, 2);
+        bad.push(("folded activation after a clamp", plan));
+        let mut plan = fused(Fused::Relu);
+        plan.ops[0].act = Block(16, 4);
+        bad.push(("folded activation after slopes", plan));
+        for (what, plan) in bad {
+            assert!(plan.check(20).is_err(), "{what} was accepted");
+        }
     }
 
     #[test]

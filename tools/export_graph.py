@@ -68,6 +68,9 @@ def container(description: bytes, weights: bytes) -> bytes:
 
 
 class Exporter:
+    # The format tag write() stamps on the plan.
+    format_tag = FORMAT
+
     def __init__(self, model: onnx.ModelProto) -> None:
         inferred = onnx.shape_inference.infer_shapes(model)
         self.graph = model.graph
@@ -368,7 +371,7 @@ class Exporter:
             if (
                 src is not None
                 and src["kind"] in ("conv", "dwconv", "add")
-                and "act" not in src
+                and not {"act", "clip", "fused"} & src.keys()
                 and readers.get(op["_x"], 0) == 1
             ):
                 src["act"] = op["w"]
@@ -445,7 +448,7 @@ class Exporter:
         source = self.root(self.graph.input[0].name)
         _, h, w, c = self.shape[self.graph.input[0].name]
         plan = {
-            "format": FORMAT,
+            "format": self.format_tag,
             "source": source_note,
             "input": {"slot": slot[source], "h": h, "w": w, "c": c},
             "outputs": [
