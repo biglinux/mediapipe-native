@@ -166,6 +166,16 @@ class ActivationFolding(unittest.TestCase):
         )
         self.assertEqual([o["kind"] for o in ops], ["conv", "prelu", "add"])
 
+    def test_prelu_stays_after_a_clip(self):
+        # The clip runs first in the source; a folded PReLU would run first.
+        ops = self.exporter(
+            [
+                {"kind": "conv", "_x": "in", "_y": "c", "clip": [0.0, 6.0]},
+                {"kind": "prelu", "_x": "c", "_y": "p", "w": [-0.5]},
+            ]
+        )
+        self.assertEqual([o["kind"] for o in ops], ["conv", "prelu"])
+
 
 @unittest.skipUnless(
     importlib.util.find_spec("tensorflow"), "the TFLite exporter needs tensorflow"
