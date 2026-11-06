@@ -127,8 +127,9 @@ def prelu(x: np.ndarray, slope: np.ndarray) -> np.ndarray:
 
 
 def hardswish(x: np.ndarray) -> np.ndarray:
-    """TFLite's definition, x * relu6(x + 3) / 6."""
-    return x * np.clip(x + 3, 0, 6) / 6
+    """TFLite's definition, x * relu6(x + 3) / 6, with the gate scaled
+    first so a large float32 input cannot overflow."""
+    return x * (np.clip(x + 3, 0, 6) / 6)
 
 
 def resize(op: dict, x: np.ndarray) -> np.ndarray:
