@@ -63,6 +63,8 @@ ACTIVATION = {
 CONSTANT_PRODUCERS = ("DEQUANTIZE", "DENSIFY")
 # Operations only plan format 4 holds.
 FORMAT4_KINDS = ("hardswish", "channelmul")
+# Operations plan format 1 lacks, as `Plan::check` refuses them there.
+FORMAT3_KINDS = ("avgpool", "clip", "resize", "depthtospace", "channelslice")
 # TfLitePadding, as MediaPipe's custom operations store it in raw options.
 TFLITE_PADDING_SAME, TFLITE_PADDING_VALID = 1, 2
 
@@ -291,8 +293,9 @@ class TfliteExporter(export_graph.Exporter):
             self.format = 4 if needs4 else 3
         elif needs4 and self.format < 4:
             raise SystemExit("this model needs plan format 4")
-        # write() stamps the module's format tag after convert().
-        export_graph.FORMAT = f"mediapipe-native-plan/{self.format}"
+        elif self.format == 1 and any(op["kind"] in FORMAT3_KINDS for op in self.ops):
+            raise SystemExit("this model needs plan format 3")
+        self.format_tag = f"mediapipe-native-plan/{self.format}"
         self.fold_into_producers()
 
     def fold_into_producers(self) -> None:
