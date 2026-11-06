@@ -103,7 +103,8 @@ def runnable(raw: bytes) -> bytes:
         for op in sub.operators:
             if op.opcodeIndex not in custom:
                 continue
-            padding, sw, sh = transpose_conv_options(bytes(op.customOptions or b""))
+            options = b"" if op.customOptions is None else bytes(op.customOptions)
+            padding, sw, sh = transpose_conv_options(options)
             x, weight, bias = op.inputs
             shape = S.BufferT()
             shape.data = list(
