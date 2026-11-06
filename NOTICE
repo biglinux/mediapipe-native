@@ -110,7 +110,8 @@ that licence and the provenance of the model with them.
    No ONNX Runtime, OpenVINO, TensorFlow Lite or other inference runtime is
    linked or called by the crate. The development tools in tools/ use NumPy,
    ONNX, ONNX Runtime, TensorFlow and FlatBuffers, installed separately, to
-   convert models and cross-check results.
+   convert models and cross-check results, and LiteRT to time the same models
+   (tools/bench_litert.py).
 
 
 A. XNNPACK, https://github.com/google/XNNPACK

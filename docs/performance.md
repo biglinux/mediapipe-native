@@ -23,23 +23,51 @@ load, and were not repeated because the host stayed loaded.
 | pose_landmarks | 4.94 ms | 5.87 ms | 33.9 ms |
 | holistic_face_landmarks | 0.80 ms | 0.99 ms | 5.4 ms |
 | face_blendshapes | 0.64 ms | 0.83 ms | 4.7 ms |
-| selfie_segmenter | 1.81 ms | 2.11 ms | not measured |
-| selfie_segmenter_landscape | 0.97 ms | 1.16 ms | not measured |
+| selfie_segmenter | 1.81 ms | 2.11 ms | 11.0 ms |
+| selfie_segmenter_landscape | 0.97 ms | 1.16 ms | 5.87 ms |
 
 The selfie segmenter rows are the build of 2026-10-29, on CPU 4 (a
-performance core) with light background load, median of three runs. On
-2026-10-07 the landscape plan's tiers 1 and 0 took 2.57 and 15.1 ms, and
-single-threaded TensorFlow Lite with XNNPACK 1.39 ms on the same core.
+performance core) with light background load, median of three runs; their i3
+figures are the build of 2026-11-06, from the LiteRT comparison below.
 
 The i3-2375M (Sandy Bridge, 2011) is the reason tier 2 exists: it has AVX but
 no AVX2 or FMA, and running the AVX path on a newer CPU is not a substitute for
 measuring it there.
 
-For reference, on 2026-09-29 — before later kernel work —
-the seven hand, pose and holistic plans took 0.80–1.12× the CPU of
-single-threaded TensorFlow Lite with XNNPACK on the same i5. A controlled
-comparison with OpenVINO has not been done; [below](#comparing-with-another-engine)
-is how to do it fairly.
+## Against LiteRT
+
+LiteRT 2.3.0 (TensorFlow Lite) with its XNNPACK CPU backend, the runtime
+MediaPipe itself uses, on the same `.tflite` models the plans are exported
+from. One thread pinned to one core for both, CPU time per frame on a seeded
+random input after 20 warm-up frames, median of three runs of 300 frames;
+build of 2026-11-06, idle machines. LiteRT is the `ai-edge-litert` 2.3.0
+Python package:
+
+```bash
+taskset -c 2 target/release/mpbench plans/hand_landmarks/hand_landmarks_detector.mpplan 300
+taskset -c 2 python3 tools/bench_litert.py plans/_downloads/hand_landmarker/hand_landmarks_detector.tflite 300
+```
+
+| Plan | Ryzen 5 5600H: this crate | Ryzen 5 5600H: LiteRT | i3-2375M: this crate | i3-2375M: LiteRT |
+|---|---:|---:|---:|---:|
+| face_detector | 0.88 ms | 0.92 ms | 5.10 ms | 6.29 ms |
+| face_landmarks | 2.64 ms | 3.52 ms | 17.26 ms | 24.94 ms |
+| hand_detector | 6.64 ms | 8.65 ms | 43.30 ms | 60.89 ms |
+| hand_landmarks | 6.78 ms | 7.24 ms | 43.64 ms | 52.96 ms |
+| pose_detector | 8.79 ms | 9.22 ms | 56.10 ms | 67.14 ms |
+| pose_landmarks | 5.07 ms | 7.09 ms | 33.87 ms | 51.85 ms |
+| holistic_face_landmarks | 0.85 ms | 1.12 ms | 5.36 ms | 7.56 ms |
+| face_blendshapes | 0.71 ms | 0.61 ms | 4.70 ms | 4.66 ms |
+| hand_roi_refinement | 0.38 ms | 0.73 ms | 2.55 ms | 3.99 ms |
+| selfie_segmenter | 1.72 ms | 2.83 ms | 11.00 ms | 17.59 ms |
+| selfie_segmenter_landscape | 0.95 ms | 1.57 ms | 5.87 ms | 9.64 ms |
+
+The pose and holistic plans run the Holistic Landmarker bundle's models.
+The blendshapes model, an MLP-Mixer over 146 landmarks, is the one LiteRT
+wins.
+
+A controlled comparison with OpenVINO has not been done;
+[below](#comparing-with-another-engine) is how to do it fairly.
 
 ## How the kernels spend their time
 
