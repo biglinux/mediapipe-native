@@ -30,7 +30,8 @@
 //! of its format-4 plan. On this noise image the person mask is almost all
 //! background: 99.6% of the probabilities are below 1e-6, where a broken
 //! layer cannot move them by 0.005. So its probabilities are also compared by
-//! their natural logarithm wherever both are at least 1e-30, again within
+//! their natural logarithm wherever either is at least 1e-30, the other
+//! read as 1e-30 when it is smaller, again within
 //! 0.005; tiers differ there by at most 0.0012. The square segmenter's golden
 //! (2026-10-29) is recorded the same way; only 2% of its probabilities reach
 //! 1e-30 on this image, so its logits are compared too: the plan with the
@@ -117,8 +118,10 @@ fn check_model(mut model: Model, expectations: &[(usize, &str, Scale)]) {
             assert!(e.is_finite(), "{name}: expected value {i} is {e}");
             assert!(g.is_finite(), "{name}: value {i} is {g}");
             let mut gap = (seen(g) - seen(e)).abs();
-            if matches!(scale, Scale::Probability) && g.min(e) >= 1.0e-30 {
-                gap = gap.max((g.ln() - e.ln()).abs());
+            // Below the cutoff both read as the cutoff, so a value that
+            // collapsed to zero still shows in the logarithm.
+            if matches!(scale, Scale::Probability) && g.max(e) >= 1.0e-30 {
+                gap = gap.max((g.max(1.0e-30).ln() - e.max(1.0e-30).ln()).abs());
             }
             if gap > worst.1 {
                 worst = (i, gap);
