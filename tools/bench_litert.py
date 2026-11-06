@@ -21,6 +21,8 @@ def main() -> None:
     if len(sys.argv) not in (2, 3):
         raise SystemExit(__doc__)
     frames = int(sys.argv[2]) if len(sys.argv) == 3 else 300
+    if frames <= 0:
+        raise SystemExit("FRAMES must be positive")
     interpreter = Interpreter(model_path=sys.argv[1], num_threads=1)
     interpreter.allocate_tensors()
     rng = np.random.default_rng(0)
